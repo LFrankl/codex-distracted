@@ -7,7 +7,7 @@
 - **ReAct 智能循环** — 思考、调用工具、观察结果，循环执行
 - **流式输出** — 响应逐 token 流式返回，无需等待完整结果
 - **两种工作模式** — 极简模式（严格按要求执行）和深度模式（探索、规划、验证）
-- **16 个内置工具** — 文件读写/修改、Shell 命令、代码搜索、Git 操作、HTTP 测试、并行子任务
+- **20 个内置工具** — 文件读写/修改、Shell 命令、代码搜索、Git 完整工作流、HTTP/网页抓取、文件符号概览、并行子任务
 - **向量索引 / RAG** — 对代码库建立本地语义索引，支持自然语言搜索代码
 - **子 Agent 并行执行** — 将独立任务分发给多个子 agent 同时运行
 - **会话持久化** — 保存并跨次恢复对话
@@ -112,8 +112,57 @@ codex [参数] [提示词]
 | `git_diff` | 显示暂存或未暂存的差异，或与某个 ref 的差异 |
 | `git_log` | 显示最近的提交记录 |
 | `git_commit` | 暂存文件并提交（显示暂存 diff，需确认） |
+| `git_branch` | 列出、创建、切换分支 |
+| `git_pull` | 从远端拉取代码（merge 或 rebase，需确认） |
+| `git_push` | 推送到远端（需确认；force push 使用 `--force-with-lease`） |
+| `web_fetch` | 抓取任意 URL 并以纯文本返回（文档、GitHub Issue、API 规范等） |
+| `file_outline` | 列出文件中所有符号（函数/类/类型）及其行号，无需读取全文 |
 | `semantic_search` | 按语义搜索代码库（需先运行 `/index`） |
 | `run_task` | 将独立任务分发给子 agent 并行执行 |
+
+## web_fetch：抓取网页
+
+`web_fetch` 让 agent 能直接读取外部 URL，无需任何 API key，纯标准库实现：
+
+```
+你：帮我看看 Go 1.23 的 release notes 有哪些新特性
+
+agent → web_fetch("https://go.dev/doc/go1.23")
+      → 解析 HTML，返回纯文本（自动去除 <script>/<style>/<nav>）
+      → 总结新特性...
+```
+
+特性：
+- 自动去除导航栏、脚本、样式等噪声，只保留正文
+- 限制响应体 200 KB，避免 token 爆炸
+- `max_lines` 参数可限制返回行数（默认 300）
+- 非 HTML 内容（JSON、纯文本）直接返回原始内容
+
+## file_outline：文件符号概览
+
+`file_outline` 扫描文件，返回所有顶层符号（函数/类/类型/接口）及其行号，**无需读取全文内容**。在大文件中先定位、再精读，大幅节省 token。
+
+支持语言：Go / Python / TypeScript / JavaScript / Rust / Java / Kotlin / Ruby / C / C++
+
+```
+你：agent.go 里 Run 方法在哪？
+
+agent → file_outline("agent/agent.go")
+
+agent/agent.go
+
+Kind    Name             Line
+─────────────────────────────
+func    New              136
+func    SetRAG           151
+func    Run              158
+func    step             203
+func    printToolCall    401
+func    toolDetail       411
+func    printToolResult  461
+
+→ 直接 read_file(agent.go, start_line=158, end_line=202)，无需读整个文件
+```
 
 ## 工作模式
 
@@ -252,9 +301,12 @@ agent → semantic_search("user authentication middleware")
 | 操作类型 | 行为 |
 |----------|------|
 | `ls`、`pwd`、`cat`、`git status`、`git log`、`git diff`、`go version` 等只读命令 | **自动通过**，无需确认 |
+| `git_branch list` | **自动通过**，只读操作 |
 | `patch_file`、`write_file` | 显示 diff 预览，需确认 |
 | `shell_exec`（非只读） | 显示命令，需确认 |
 | `git_commit` | 显示暂存 diff，需确认 |
+| `git_pull` | 显示拉取目标，需确认 |
+| `git_push` | 显示推送目标，需确认；force push 额外标注 `(FORCE)` |
 | `move_file`、`delete_file` | 需确认 |
 
 使用 `-y` / `--auto-approve` 跳过所有确认。
@@ -342,7 +394,9 @@ providers:
 ├── agent/
 │   ├── agent.go            # 主循环、LLM 流式调用、工具分发
 │   ├── tools.go            # 工具注册：读/写/修改/Shell/搜索/列表
-│   ├── tools_git.go        # Git 工具：status/diff/log/commit
+│   ├── tools_git.go        # Git 工具：status/diff/log/commit/branch/pull/push
+│   ├── tools_fetch.go      # 网页抓取工具（web_fetch）
+│   ├── tools_outline.go    # 文件符号概览工具（file_outline）
 │   ├── tools_rag.go        # 语义搜索工具（semantic_search）
 │   ├── tools_subagent.go   # 子 agent 工具（run_task）
 │   ├── subagent.go         # 子 agent 运行器

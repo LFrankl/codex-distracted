@@ -54,6 +54,11 @@ func NewToolRegistry(workDir string, approver Approver, client *llm.Client, dept
 		r.defGitDiff(),
 		r.defGitLog(),
 		r.defGitCommit(),
+		r.defGitBranch(),
+		r.defGitPull(),
+		r.defGitPush(),
+		r.defWebFetch(),
+		r.defFileOutline(),
 		r.defSemanticSearch(),
 		r.defRunTask(), // registered at all depths; blocked at runtime when depth > 0
 	}
@@ -94,6 +99,16 @@ func (r *ToolRegistry) Execute(ctx context.Context, name, argsJSON string) ToolR
 		return r.gitLog(argsJSON)
 	case "git_commit":
 		return r.gitCommit(argsJSON)
+	case "git_branch":
+		return r.gitBranch(argsJSON)
+	case "git_pull":
+		return r.gitPull(argsJSON)
+	case "git_push":
+		return r.gitPush(argsJSON)
+	case "web_fetch":
+		return r.webFetch(argsJSON)
+	case "file_outline":
+		return r.fileOutline(argsJSON)
 	case "semantic_search":
 		return r.semanticSearch(argsJSON)
 	case "run_task":

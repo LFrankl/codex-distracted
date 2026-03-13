@@ -235,6 +235,224 @@ func (r *ToolRegistry) gitCommit(argsJSON string) ToolResult {
 	return ToolResult{Content: summary}
 }
 
+func (r *ToolRegistry) defGitBranch() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name: "git_branch",
+			Description: `List, create, or switch git branches.
+- action "list" (default): show all local branches with current branch marked.
+- action "create": create a new branch from an optional base ref, then check it out.
+- action "checkout": switch to an existing branch.`,
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"list", "create", "checkout"},
+						"description": `"list" (default), "create", or "checkout"`,
+					},
+					"name": map[string]any{
+						"type":        "string",
+						"description": "Branch name (required for create/checkout)",
+					},
+					"base": map[string]any{
+						"type":        "string",
+						"description": "Base ref for create (default HEAD). E.g. main, HEAD~3.",
+					},
+				},
+			},
+		},
+	}
+}
+
+func (r *ToolRegistry) defGitPull() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "git_pull",
+			Description: "Fetch and merge (or rebase) remote changes into the current branch.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"remote": map[string]any{
+						"type":        "string",
+						"description": "Remote name (default: origin)",
+					},
+					"branch": map[string]any{
+						"type":        "string",
+						"description": "Remote branch to pull (default: tracking branch)",
+					},
+					"rebase": map[string]any{
+						"type":        "boolean",
+						"description": "Use --rebase instead of merge (default false)",
+					},
+				},
+			},
+		},
+	}
+}
+
+func (r *ToolRegistry) defGitPush() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "git_push",
+			Description: "Push local commits to a remote. Always asks for user confirmation. Force push asks twice.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"remote": map[string]any{
+						"type":        "string",
+						"description": "Remote name (default: origin)",
+					},
+					"branch": map[string]any{
+						"type":        "string",
+						"description": "Branch to push (default: current branch)",
+					},
+					"force": map[string]any{
+						"type":        "boolean",
+						"description": "Force push (--force-with-lease). Requires explicit user approval.",
+					},
+					"set_upstream": map[string]any{
+						"type":        "boolean",
+						"description": "Set upstream tracking (-u). Use on first push of a new branch.",
+					},
+				},
+			},
+		},
+	}
+}
+
+// --- git_branch / git_pull / git_push implementations ---
+
+func (r *ToolRegistry) gitBranch(argsJSON string) ToolResult {
+	var args struct {
+		Action string `json:"action"`
+		Name   string `json:"name"`
+		Base   string `json:"base"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+	if args.Action == "" {
+		args.Action = "list"
+	}
+
+	switch args.Action {
+	case "list":
+		out, err := r.gitRun("branch", "-v")
+		if err != nil {
+			return ToolResult{Content: out, IsError: true}
+		}
+		if strings.TrimSpace(out) == "" {
+			return ToolResult{Content: "no branches yet"}
+		}
+		return ToolResult{Content: out}
+
+	case "create":
+		if args.Name == "" {
+			return ToolResult{Content: "name is required for create", IsError: true}
+		}
+		gitArgs := []string{"checkout", "-b", args.Name}
+		if args.Base != "" {
+			gitArgs = append(gitArgs, args.Base)
+		}
+		out, err := r.gitRun(gitArgs...)
+		if err != nil {
+			return ToolResult{Content: fmt.Sprintf("create branch failed: %s", out), IsError: true}
+		}
+		return ToolResult{Content: fmt.Sprintf("created and switched to branch '%s'\n%s", args.Name, out)}
+
+	case "checkout":
+		if args.Name == "" {
+			return ToolResult{Content: "name is required for checkout", IsError: true}
+		}
+		out, err := r.gitRun("checkout", args.Name)
+		if err != nil {
+			return ToolResult{Content: fmt.Sprintf("checkout failed: %s", out), IsError: true}
+		}
+		return ToolResult{Content: out}
+
+	default:
+		return ToolResult{Content: fmt.Sprintf("unknown action: %s (use list/create/checkout)", args.Action), IsError: true}
+	}
+}
+
+func (r *ToolRegistry) gitPull(argsJSON string) ToolResult {
+	var args struct {
+		Remote string `json:"remote"`
+		Branch string `json:"branch"`
+		Rebase bool   `json:"rebase"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+	if args.Remote == "" {
+		args.Remote = "origin"
+	}
+
+	if !r.approver("git pull", fmt.Sprintf("%s %s", args.Remote, args.Branch)) {
+		return ToolResult{Content: "git_pull cancelled by user", IsError: true}
+	}
+
+	gitArgs := []string{"pull"}
+	if args.Rebase {
+		gitArgs = append(gitArgs, "--rebase")
+	}
+	gitArgs = append(gitArgs, args.Remote)
+	if args.Branch != "" {
+		gitArgs = append(gitArgs, args.Branch)
+	}
+
+	out, err := r.gitRun(gitArgs...)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("pull failed: %s", out), IsError: true}
+	}
+	return ToolResult{Content: out}
+}
+
+func (r *ToolRegistry) gitPush(argsJSON string) ToolResult {
+	var args struct {
+		Remote      string `json:"remote"`
+		Branch      string `json:"branch"`
+		Force       bool   `json:"force"`
+		SetUpstream bool   `json:"set_upstream"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+	if args.Remote == "" {
+		args.Remote = "origin"
+	}
+
+	desc := fmt.Sprintf("%s %s", args.Remote, args.Branch)
+	if args.Force {
+		desc += " (FORCE)"
+	}
+	if !r.approver("git push", desc) {
+		return ToolResult{Content: "git_push cancelled by user", IsError: true}
+	}
+
+	gitArgs := []string{"push"}
+	if args.Force {
+		gitArgs = append(gitArgs, "--force-with-lease")
+	}
+	if args.SetUpstream {
+		gitArgs = append(gitArgs, "-u")
+	}
+	gitArgs = append(gitArgs, args.Remote)
+	if args.Branch != "" {
+		gitArgs = append(gitArgs, args.Branch)
+	}
+
+	out, err := r.gitRun(gitArgs...)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("push failed: %s", out), IsError: true}
+	}
+	return ToolResult{Content: out}
+}
+
 // --- helpers ---
 
 func (r *ToolRegistry) gitRun(args ...string) (string, error) {

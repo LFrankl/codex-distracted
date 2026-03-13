@@ -2,17 +2,20 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"codex/llm"
 )
 
-// compressionThreshold is the estimated token count that triggers compression.
-const compressionThreshold = 4000
+// compressionThreshold is the estimated token count that triggers proactive compression.
+// The estimator is ~3 chars/token, so this ≈ 60k actual chars ≈ ~20k tokens.
+// Most models have 128k context; we compress before hitting the wall.
+const compressionThreshold = 20000
 
 // keepRecentMessages is how many recent messages to preserve verbatim.
-const keepRecentMessages = 4
+const keepRecentMessages = 6
 
 // maxAssistantRunes is the max length of an assistant text message stored in history.
 // Long explanations don't need to be replayed verbatim; a truncated version is fine.
@@ -53,7 +56,7 @@ func (a *Agent) maybeCompress(ctx context.Context) error {
 
 	cutoff := len(a.messages) - keepRecentMessages
 	toCompress := a.messages[1:cutoff] // skip system prompt
-	recent := a.messages[cutoff:]
+	recent := sanitizeRecent(a.messages[cutoff:])
 
 	summary, err := a.summarize(ctx, toCompress)
 	if err != nil {
@@ -124,6 +127,76 @@ func (a *Agent) summarize(ctx context.Context, msgs []llm.Message) (string, erro
 		return s, nil
 	}
 	return "", fmt.Errorf("unexpected summary content type")
+}
+
+// sanitizeRecent trims the front of a message slice so it starts at a clean
+// user-turn boundary. After compression the tail can begin with orphaned
+// tool-result messages (their preceding assistant+tool_calls was compressed
+// away), which the API rejects with "tool must follow tool_calls".
+//
+// Strategy: walk forward until we find either a user message or an assistant
+// message that has plain text (not just tool_calls). Drop everything before it.
+func sanitizeRecent(msgs []llm.Message) []llm.Message {
+	for i, m := range msgs {
+		switch m.Role {
+		case "user":
+			return msgs[i:]
+		case "assistant":
+			// Keep if it has real content (not a pure tool-dispatch message).
+			if s, ok := m.Content.(string); ok && strings.TrimSpace(s) != "" {
+				return msgs[i:]
+			}
+		}
+		// role=="tool" or assistant with only tool_calls → skip
+	}
+	return nil // everything was orphaned; caller will handle empty recent
+}
+
+// isContextLengthError returns true when the API rejected the request due to token limit.
+func isContextLengthError(err error) bool {
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		return strings.Contains(apiErr.Message, "context length") ||
+			strings.Contains(apiErr.Message, "maximum context") ||
+			strings.Contains(apiErr.Message, "too long") ||
+			apiErr.Code == "context_length_exceeded" ||
+			apiErr.Code == "invalid_request_error"
+	}
+	// Fallback: check the stringified error
+	msg := err.Error()
+	return strings.Contains(msg, "context length") ||
+		strings.Contains(msg, "maximum context") ||
+		strings.Contains(msg, "reduce the length")
+}
+
+// forceCompress aggressively compresses history regardless of the threshold.
+// Keeps only the system prompt + keepRecentMessages most recent messages.
+func (a *Agent) forceCompress(ctx context.Context) error {
+	if len(a.messages) < 3 {
+		return nil
+	}
+	cutoff := len(a.messages) - keepRecentMessages
+	if cutoff < 1 {
+		cutoff = 1
+	}
+	toCompress := a.messages[1:cutoff]
+	recent := sanitizeRecent(a.messages[cutoff:])
+
+	summary, err := a.summarize(ctx, toCompress)
+	if err != nil {
+		return err
+	}
+
+	compressed := []llm.Message{
+		a.messages[0],
+		{Role: "user", Content: "[Earlier conversation summary]\n" + summary},
+		{Role: "assistant", Content: "Understood."},
+	}
+	compressed = append(compressed, recent...)
+
+	fmt.Fprintf(a.out, "\033[2m[context compressed: %d messages → summary]\033[0m\n", len(toCompress))
+	a.messages = compressed
+	return nil
 }
 
 // trimAssistantContent truncates long assistant text replies before storing in history.

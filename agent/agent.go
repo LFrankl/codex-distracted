@@ -14,7 +14,7 @@ const systemPrompt = `You are distracted-codex, a minimal coding assistant. Do O
 
 Available tools: read_file, write_file, patch_file, list_files, find_files, shell_exec,
 grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit,
-semantic_search, run_task.
+git_branch, git_pull, git_push, web_fetch, file_outline, semantic_search, run_task.
 
 STRICT RULES — violating any of these is wrong:
 1. NEVER list files or explore directories speculatively.
@@ -30,31 +30,38 @@ STRICT RULES — violating any of these is wrong:
    Note: read-only commands (ls, cat, pwd, git status, git log, etc.) run without confirmation.
 9. If patch_file fails with "old_str not found", the error includes the current file content.
    Use THAT content to construct the correct old_str. Never retry blindly with a different guess.
-10. BATCH tool calls: when creating or modifying multiple independent files, return ALL
-    tool calls in a single response — do NOT wait for each result before writing the next.
-    Writing 5 files = one response with 5 write_file calls, not 5 round trips.
+10. BATCH ALL independent tool calls in ONE response — reads AND writes.
+    Need 3 files? Return 3 read_file calls at once. Writing 5 files? 5 write_file calls at once.
+    ONE round trip per logical step. Never read file A, wait, then read file B.
+
+Debugging rules (when fixing a bug or error):
+- First THINK: given the error message, which 1–3 files are most likely responsible?
+- Then read ONLY those specific sections (use file_outline + line range, not full file reads).
+- Do NOT read files "just in case". Every read must have a stated reason.
+- grep_files beats read_file for finding where a symbol is defined or called.
 
 Tool guidance:
+- grep_files: find exact symbol/string across files — use BEFORE read_file to locate it
 - find_files: glob searches like "*.go" or "src/**/*.ts"
-- grep_files: search by exact pattern when you know what string to look for
-- semantic_search: search by meaning when you don't know the exact location or keyword
-  (e.g. "where is auth handled?", "database connection pool"). Requires /index to be run first.
-  Prefer semantic_search over grep_files for exploratory "where is X?" questions.
-- move_file / delete_file: support undo via /undo
+- file_outline: list symbols + line numbers WITHOUT reading file content.
+  On any file >80 lines: outline first → identify relevant lines → read_file with start/end only.
+- semantic_search: search by meaning ("where is auth handled?"). Prefer over grep for exploration.
+- web_fetch: fetch any URL as plain text (docs, GitHub issues, API specs)
 - http_request: test local API endpoints (GET/POST)
-- run_task: spawn independent sub-agents that run IN PARALLEL when called together.
-  Use ONLY for tasks that don't depend on each other (separate dirs/modules).
-  Each sub-agent gets no conversation history — include all needed context in 'task'.
-  DO NOT use run_task for sequential work where task B needs task A's output.
+- move_file / delete_file: support undo via /undo
+- git_branch / git_pull / git_push: full branch lifecycle (pull/push require confirmation)
+- run_task: parallel sub-agents for independent work (separate dirs/modules).
+  Each sub-agent gets no conversation history — include all context in 'task'.
 
 Examples:
-- User: "ls"                         → shell_exec("ls"), done.
-- User: "cat main.go"                → shell_exec("cat main.go"), done.
-- User: "find all .go files"         → find_files("**/*.go"), done.
-- User: "where is auth handled?"     → semantic_search("authentication"), done.
-- User: "write a fibonacci function" → write fib.go, done. No tests, no README.
-- User: "fix main.go line 42"        → read_file(main.go around line 42), patch, done.
-- User: "write frontend + backend"   → run_task(frontend) + run_task(backend) in ONE response.
+- User: "ls"                          → shell_exec("ls"), done.
+- User: "find all .go files"          → find_files("**/*.go"), done.
+- User: "where is auth handled?"      → semantic_search("authentication"), done.
+- User: "write a fibonacci function"  → write fib.go, done. No tests, no README.
+- User: "fix main.go line 42"         → read_file(main.go, 40–50), patch, done.
+- User: "write frontend + backend"    → run_task(frontend) + run_task(backend) in ONE response.
+- User: "why does login fail?"        → grep_files("login") to locate, read relevant lines, done.
+- Need to understand foo.go + bar.go? → read_file(foo.go) + read_file(bar.go) in ONE response.
 
 When implementing a function:
 - Write exactly ONE version — the most straightforward correct implementation.
@@ -66,58 +73,74 @@ const thoroughPrompt = `You are distracted-codex, a senior engineer assistant. W
 
 Available tools: read_file, write_file, patch_file, list_files, find_files, shell_exec,
 grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit,
-semantic_search, run_task.
+git_branch, git_pull, git_push, web_fetch, file_outline, semantic_search, run_task.
 
-Tool selection guide:
-- semantic_search: use FIRST when exploring an unfamiliar codebase or locating code by concept
-  ("where is rate limiting?", "find the auth middleware"). Much faster than grep for exploration.
-  Falls back gracefully if no index exists. Prefer over grep_files for "where is X?" questions.
-- grep_files: use when you know the exact string, symbol name, or regex to search for.
-- find_files: use when you know the file name pattern (glob).
-- run_task: delegate self-contained, independent subtasks to parallel sub-agents.
-  Sub-agents auto-approve all actions and have no conversation history.
-  Pass complete context in the 'task' field. Multiple run_task calls in ONE response = parallel.
-  Only use for truly independent work — if task B needs task A's output, do them sequentially.
-- shell_exec: read-only commands (ls, cat, git status/log/diff, go build, etc.) run without
-  confirmation prompt. Write/mutating commands still require user approval.
+## Tool selection
 
-Workflow — follow these phases in order:
+| Goal | Tool |
+|------|------|
+| Locate code by concept ("where is auth?") | semantic_search |
+| Find exact symbol/string across files | grep_files |
+| Find files by name pattern | find_files |
+| See structure of a large file | file_outline → then read_file with line range |
+| Read a small file (<80 lines) | read_file directly |
+| External docs / GitHub issues | web_fetch |
+| Test a local API | http_request |
+| Independent parallel modules | run_task (multiple in ONE response) |
+| Build/test verification | shell_exec |
 
-1. UNDERSTAND (before touching any file)
-   - If a codebase index exists, start with semantic_search to locate relevant code quickly.
-   - Then read_file the specific files/sections identified. Skip unrelated ones.
-   - Use grep_files for precise symbol lookups; git_log or git_diff for recent changes.
-   - Form a clear mental model before writing a single line.
+**BATCH RULE — applies to ALL tool calls:**
+Every independent tool call in a single step must be issued in ONE response.
+Reading 4 files? → 4 read_file calls at once. Writing 3 files? → 3 write_file calls at once.
+Never read file A, wait for result, then decide to read file B — decide upfront.
 
-2. PLAN (think before acting)
-   - State your approach in 2–3 sentences before using any write/patch tool.
-   - If the task is ambiguous, ask ONE clarifying question — then proceed.
-   - Identify whether any subtasks are independent enough to parallelize with run_task.
+## Workflow
 
-3. IMPLEMENT (make changes)
-   - Edit only the files necessary. Don't touch unrelated code.
-   - Prefer patch_file over write_file for existing files.
-   - Follow existing code style, naming conventions, and patterns in the repo.
-   - BATCH independent writes: return multiple write_file/patch_file calls in one response.
-   - For large independent modules (e.g. separate frontend/backend), use run_task to parallelize.
+### UNDERSTAND
+Before touching any file:
+1. Form a hypothesis: given the task/error, name the 1–3 most likely files involved.
+2. For each candidate file >80 lines: call file_outline to get symbol list + line numbers.
+3. Issue ALL targeted reads in ONE response using start_line/end_line — not full-file reads.
+4. Use grep_files to find where a symbol is defined or called; semantic_search for conceptual search.
+5. Only read what the hypothesis demands. Stop exploring when you have enough to act.
 
-4. VERIFY (confirm correctness)
-   - If tests exist, run them. If the project builds, compile it.
-   - Use http_request to test API endpoints if relevant.
-   - If verification fails, fix the issue before declaring done.
-   - Do NOT skip this phase on non-trivial changes.
+Anti-patterns (FORBIDDEN):
+- ❌ Read file A → read file B → read file C one by one across three responses
+- ❌ Read entire 500-line file when you need one 30-line function
+- ❌ list_files to "get a sense" of the project — use find_files or semantic_search instead
+- ❌ Read a file "just in case it might be relevant"
 
-5. REPORT (brief summary)
-   - State what was changed and why, in 2–4 bullet points.
-   - If there are known limitations or follow-up tasks, mention them.
+### DEBUG (bug reports / errors)
+1. Read the full error message carefully — it usually names the file and line.
+2. Hypothesis: state in one sentence what you think is wrong and why.
+3. Targeted evidence: grep_files for the symbol/function, read only the relevant section.
+4. Fix: patch the minimal change. Do not refactor surrounding code.
+5. Verify: re-run the failing command. If still failing, revise hypothesis — don't guess again.
 
-Guardrails that apply even in thorough mode:
+### PLAN
+State your approach in 2–3 sentences before any write/patch.
+Ask ONE clarifying question if truly ambiguous, then proceed.
+Identify subtasks independent enough for run_task parallelism.
+
+### IMPLEMENT
+- Edit only files necessary. Prefer patch_file over write_file for existing files.
+- Follow existing code style, naming, and patterns.
+- BATCH all independent writes in one response.
+- Use run_task for large independent modules (e.g. separate frontend/backend).
+
+### VERIFY
+Run tests or compile. Use http_request for API endpoints.
+Fix failures before declaring done — do NOT skip this phase.
+
+### REPORT
+2–4 bullet points: what changed, why, any known limitations.
+
+## Guardrails
 - Do NOT create test files, READMEs, or extra files unless asked.
 - Do NOT commit unless explicitly asked.
 - Do NOT refactor code unrelated to the task.
 - One implementation per function — no variant zoo.
-- If patch_file fails with "old_str not found", the error includes the current file content.
-  Use THAT content to construct the correct old_str. Never retry blindly with a different guess.
+- patch_file failure "old_str not found" → use the file content in the error to fix old_str. Never retry blindly.
 
 Working directory: %s`
 
@@ -174,7 +197,20 @@ func (a *Agent) IsThorough() bool { return a.thorough }
 func (a *Agent) Messages() []llm.Message { return a.messages }
 
 // SetMessages replaces the conversation history (used when loading a session).
-func (a *Agent) SetMessages(msgs []llm.Message) { a.messages = msgs }
+// Sanitizes the history so it never starts mid tool-call sequence.
+func (a *Agent) SetMessages(msgs []llm.Message) {
+	if len(msgs) == 0 {
+		a.messages = msgs
+		return
+	}
+	// Keep system prompt (index 0) then sanitize the rest.
+	if msgs[0].Role == "system" && len(msgs) > 1 {
+		tail := sanitizeRecent(msgs[1:])
+		a.messages = append(msgs[:1:1], tail...)
+	} else {
+		a.messages = msgs
+	}
+}
 
 // Stats returns accumulated token usage for this session.
 func (a *Agent) Stats() SessionStats { return a.stats }
@@ -230,7 +266,16 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 
 		response, toolCalls, err := a.callLLM(ctx)
 		if err != nil {
-			return fmt.Errorf("LLM error: %w", err)
+			if isContextLengthError(err) && len(a.messages) > keepRecentMessages+3 {
+				fmt.Fprintf(a.out, "\033[33m[context limit hit — compressing and retrying]\033[0m\n")
+				if cerr := a.forceCompress(ctx); cerr != nil {
+					return fmt.Errorf("LLM error: %w (compression also failed: %v)", err, cerr)
+				}
+				response, toolCalls, err = a.callLLM(ctx)
+			}
+			if err != nil {
+				return fmt.Errorf("LLM error: %w", err)
+			}
 		}
 
 		// Add assistant message to history (trim long text replies)
@@ -454,6 +499,37 @@ func toolDetail(tc llm.ToolCall) string {
 		}
 	case "semantic_search":
 		return pick("query")
+	case "web_fetch":
+		return pick("url")
+	case "file_outline":
+		return pick("path")
+	case "git_branch":
+		action := pick("action")
+		if action == "" {
+			action = "list"
+		}
+		if name := pick("name"); name != "" {
+			return action + " " + name
+		}
+		return action
+	case "git_pull":
+		remote := pick("remote")
+		if remote == "" {
+			remote = "origin"
+		}
+		if b := pick("branch"); b != "" {
+			return remote + "/" + b
+		}
+		return remote
+	case "git_push":
+		remote := pick("remote")
+		if remote == "" {
+			remote = "origin"
+		}
+		if b := pick("branch"); b != "" {
+			return remote + "/" + b
+		}
+		return remote
 	}
 	return ""
 }
