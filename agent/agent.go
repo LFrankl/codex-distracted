@@ -10,7 +10,7 @@ import (
 	"codex/llm"
 )
 
-const systemPrompt = `You are Codex, a minimal coding assistant. Do ONLY what was explicitly asked.
+const systemPrompt = `You are distracted-codex, a minimal coding assistant. Do ONLY what was explicitly asked.
 
 STRICT RULES — violating any of these is wrong:
 1. NEVER list files or explore directories speculatively.
@@ -42,7 +42,7 @@ When implementing a function:
 
 Working directory: %s`
 
-const thoroughPrompt = `You are Codex, a senior engineer assistant. Work in a structured, professional manner.
+const thoroughPrompt = `You are distracted-codex, a senior engineer assistant. Work in a structured, professional manner.
 
 Workflow — follow these phases in order:
 

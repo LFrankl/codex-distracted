@@ -1,55 +1,55 @@
-# Codex
+# distracted-codex
 
-A minimal AI coding agent for the terminal. Built in Go, works with any OpenAI-compatible API — designed for Chinese domestic providers (DeepSeek, Qwen, Zhipu, Moonshot) as well as OpenAI itself.
+一个极简的 AI 编程助手命令行工具，用 Go 编写，支持任何 OpenAI 兼容的 API——专为国产 AI 提供商（DeepSeek、Qwen、智谱、Moonshot）设计，同时也支持 OpenAI。
 
-## Features
+## 功能特性
 
-- **ReAct agent loop** — thinks, calls tools, observes results, repeats
-- **Streaming output** — responses stream token by token, no waiting for full reply
-- **Two modes** — minimal (do exactly what's asked) and thorough (explore, plan, verify)
-- **10 built-in tools** — file read/write/patch, shell exec, grep, git operations
-- **Session persistence** — save and resume conversations across invocations
-- **Context compression** — automatically summarizes old history to stay within token limits
-- **Undo stack** — revert any file write or patch with `/undo`
-- **Project memory** — place a `.codex.md` in your project root; it's injected into every session
-- **Approval prompts** — shell commands and patches require confirmation (skip with `-y`)
-- **Bordered input box** — clean terminal UI with dimmed history, arrow-key navigation
+- **ReAct 智能循环** — 思考、调用工具、观察结果，循环执行
+- **流式输出** — 响应逐 token 流式返回，无需等待完整结果
+- **两种工作模式** — 极简模式（严格按要求执行）和深度模式（探索、规划、验证）
+- **10 个内置工具** — 文件读写/修改、Shell 命令、代码搜索、Git 操作
+- **会话持久化** — 保存并跨次恢复对话
+- **上下文压缩** — 自动摘要旧历史，保持在 token 限制内
+- **撤销栈** — 使用 `/undo` 撤销任意文件写入或修改
+- **项目记忆** — 在项目根目录放置 `.codex.md`，每次会话自动注入
+- **操作确认** — Shell 命令和文件修改需要确认（`-y` 跳过）
+- **带框输入框** — 简洁的终端 UI，历史记录灰显，支持方向键导航
 
-## Installation
+## 安装
 
 ```bash
 git clone https://github.com/LFrankl/codex-distracted
 cd codex-distracted
-go build -o codex .
-sudo mv codex /usr/local/bin/
+go build -o distracted-codex .
+sudo mv distracted-codex /usr/local/bin/
 ```
 
-Requires Go 1.21+.
+需要 Go 1.21+。
 
-## Quick start
+## 快速开始
 
 ```bash
-# Set up a provider
+# 配置提供商
 codex config set-provider deepseek
 codex config set-key deepseek sk-xxxxxxxxxxxxxxxx
 
-# One-shot
-codex "write a binary search function in Go"
+# 单次执行
+codex "用 Go 写一个二分查找函数"
 
-# Interactive REPL
+# 交互式 REPL
 codex
 ```
 
-## Supported providers
+## 支持的提供商
 
-| Name | Base URL | Default model |
-|------|----------|---------------|
+| 名称 | Base URL | 默认模型 |
+|------|----------|----------|
 | `deepseek` | `https://api.deepseek.com/v1` | `deepseek-chat` |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-max` |
 | `zhipu` | `https://open.bigmodel.cn/api/paas/v4` | `glm-4` |
 | `moonshot` | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
 
-Any OpenAI-compatible endpoint works — add a custom provider via `codex config`:
+支持任何 OpenAI 兼容的接口，通过 `codex config` 添加自定义提供商：
 
 ```bash
 codex config set-provider myprovider
@@ -57,123 +57,121 @@ codex config set-key myprovider sk-xxx
 codex config set-model myprovider my-model-name
 ```
 
-Then edit `~/.codex/config.yaml` to set `base_url` for the new provider.
+然后编辑 `~/.codex/config.yaml` 设置 `base_url`。
 
-## CLI flags
+## 命令行参数
 
 ```
-codex [flags] [prompt]
+codex [参数] [提示词]
 
-Flags:
-  -p, --provider string    Provider to use (overrides config)
-  -m, --model string       Model to use (overrides provider default)
-  -d, --dir string         Working directory (defaults to current dir)
-  -y, --auto-approve       Skip confirmation prompts
-  -s, --session string     Resume a saved session by ID
-      --save-as string     Auto-save session on exit with this name
-      --thorough           Thorough mode: explore, plan, verify changes
+参数：
+  -p, --provider string    使用的提供商（覆盖配置）
+  -m, --model string       使用的模型（覆盖提供商默认值）
+  -d, --dir string         工作目录（默认为当前目录）
+  -y, --auto-approve       跳过所有确认提示
+  -s, --session string     通过 ID 恢复已保存的会话
+      --save-as string     退出时自动以此名称保存会话
+      --thorough           深度模式：探索代码库、规划、验证变更
 ```
 
-## REPL commands
+## REPL 命令
 
-| Command | Description |
-|---------|-------------|
-| `/thorough` | Switch to thorough mode |
-| `/default` | Switch back to minimal mode |
-| `/mode` | Show current mode |
-| `/reset` | Clear conversation history |
-| `/undo` | Revert last file write or patch |
-| `/save [name]` | Save current session |
-| `/load <id>` | Load a saved session |
-| `/sessions` | List saved sessions |
-| `/help` | Show help |
-| `exit` / `Ctrl+D` | Exit (prompts to save if unsaved) |
-| `Ctrl+C` twice | Exit immediately |
+| 命令 | 描述 |
+|------|------|
+| `/thorough` | 切换到深度模式 |
+| `/default` | 切换回极简模式 |
+| `/mode` | 显示当前模式 |
+| `/reset` | 清除对话历史 |
+| `/undo` | 撤销最后一次文件写入或修改 |
+| `/save [名称]` | 保存当前会话 |
+| `/load <id>` | 加载已保存的会话 |
+| `/sessions` | 列出所有已保存的会话 |
+| `/help` | 显示帮助 |
+| `exit` / `Ctrl+D` | 退出（如有未保存内容会提示保存） |
+| 连按两次 `Ctrl+C` | 立即退出 |
 
-## Tools
+## 工具列表
 
-The agent has access to these tools:
+| 工具 | 描述 |
+|------|------|
+| `read_file` | 读取文件内容，可指定行范围 |
+| `write_file` | 创建或覆盖文件 |
+| `patch_file` | 精确替换文件中的字符串或行范围（显示 diff，需确认） |
+| `list_files` | 列出目录内容 |
+| `shell_exec` | 执行 Shell 命令（需确认；命令末尾加 `&` 可后台运行） |
+| `grep_files` | 在文件中搜索内容 |
+| `git_status` | 显示工作区状态 |
+| `git_diff` | 显示暂存或未暂存的差异，或与某个 ref 的差异 |
+| `git_log` | 显示最近的提交记录 |
+| `git_commit` | 暂存文件并提交（显示暂存 diff，需确认） |
 
-| Tool | Description |
-|------|-------------|
-| `read_file` | Read a file, optionally specifying line range |
-| `write_file` | Create or overwrite a file |
-| `patch_file` | Replace an exact string or line range in a file (shows diff, requires approval) |
-| `list_files` | List directory contents |
-| `shell_exec` | Run a shell command (requires approval; trailing `&` runs in background) |
-| `grep_files` | Search file contents with a pattern |
-| `git_status` | Show working tree status |
-| `git_diff` | Show staged or unstaged diff, or diff against a ref |
-| `git_log` | Show recent commits |
-| `git_commit` | Stage files and commit (shows staged diff, requires approval) |
+## 工作模式
 
-## Modes
+### 极简模式（默认）
 
-### Minimal (default)
+严格、专注任务。完全按照要求执行，不进行推测性的文件探索，不创建额外文件，不自作主张运行测试。说"ls"就执行 `ls`，说"写一个 fibonacci 函数"就写一个文件，完毕。
 
-Strict, task-focused. The agent does exactly what was asked — no speculative file exploration, no extra files, no unsolicited tests. If you say "ls", it runs `ls`. If you say "write a fibonacci function", it writes one file, done.
+### 深度模式（`--thorough` 或 REPL 中 `/thorough`）
 
-### Thorough (`--thorough` or `/thorough` in REPL)
+结构化五阶段工作流：
 
-Structured five-phase workflow:
+1. **理解** — 读取相关文件，查看 git 历史
+2. **规划** — 动手前先陈述方案
+3. **实现** — 只修改必要文件，优先使用 `patch_file` 而非整体重写
+4. **验证** — 运行测试或编译；发现失败先修复再结束
+5. **汇报** — 总结改了什么、为什么
 
-1. **Understand** — read relevant files, check git history
-2. **Plan** — state approach before touching anything
-3. **Implement** — edit only necessary files, prefer `patch_file` over full rewrites
-4. **Verify** — run tests or compile; fix failures before declaring done
-5. **Report** — summarize what changed and why
+深度模式下 `❯` 提示符变为紫色。
 
-The `❯` prompt turns purple in thorough mode.
+## 上下文压缩
 
-## Context compression
+当对话历史较长（估算超过 4000 token）时，旧消息会自动被摘要替换。摘要保留：
 
-When conversation history grows large (estimated >4000 tokens), older messages are automatically summarized and replaced with a compact summary. The summary preserves:
+- 创建或修改的文件及变更内容
+- 关键决策及原因
+- 遇到的错误及解决方式
 
-- Files created or modified and what changed
-- Key decisions and their reasons
-- Errors encountered and how they were resolved
+最近的消息始终完整保留。Shell 输出在历史中截断为 2000 字符（但在终端完整显示）。
 
-Recent messages are always kept verbatim. Large shell output is truncated to 2000 characters in history (but displayed in full in the terminal).
+## 项目记忆
 
-## Project memory
-
-Create a `.codex.md` file in your project root. It's automatically loaded and appended to the system prompt at the start of each session:
+在项目根目录创建 `.codex.md` 文件，每次会话开始时自动注入系统提示词：
 
 ```markdown
-# My Project
+# 我的项目
 
-- Uses PostgreSQL, not SQLite
-- API lives in `internal/api/`, handlers in `internal/handler/`
-- Run tests with `make test`
-- Never modify `generated/` files by hand
+- 使用 PostgreSQL，不是 SQLite
+- API 在 `internal/api/`，Handler 在 `internal/handler/`
+- 运行测试：`make test`
+- 不要手动修改 `generated/` 目录下的文件
 ```
 
-The file is only loaded from the exact working directory — not from parent directories.
+只从当前工作目录加载，不向上查找父目录。
 
-## Session management
+## 会话管理
 
 ```bash
-# Save current session
+# 保存当前会话
 /save my-feature
 
-# List all sessions
+# 列出所有会话
 codex session list
 
-# Resume a session
+# 恢复会话
 codex --session abc123
 
-# Show session content
+# 查看会话内容
 codex session show abc123
 
-# Delete a session
+# 删除会话
 codex session delete abc123
 ```
 
-Sessions are stored as JSON in `~/.codex/sessions/`.
+会话以 JSON 格式存储在 `~/.codex/sessions/`。
 
-## Configuration file
+## 配置文件
 
-`~/.codex/config.yaml`:
+`~/.codex/config.yaml`：
 
 ```yaml
 current_provider: deepseek
@@ -192,49 +190,49 @@ providers:
     model: my-model
 ```
 
-`work_dir` is intentionally never persisted — it's always resolved from the current directory at runtime.
+`work_dir` 故意不持久化——每次运行时从当前目录动态解析。
 
-## Project structure
+## 项目结构
 
 ```
 .
-├── main.go                 # Entry point
+├── main.go                 # 入口
 ├── cmd/
-│   ├── root.go             # Root command, REPL loop, flag definitions
-│   ├── config.go           # `codex config` subcommand
-│   ├── session.go          # `codex session` subcommand
-│   └── liner.go            # Custom line editor (CJK-safe, bordered input box)
+│   ├── root.go             # 根命令、REPL 循环、参数定义
+│   ├── config.go           # `codex config` 子命令
+│   ├── session.go          # `codex session` 子命令
+│   └── liner.go            # 自定义行编辑器（CJK 安全、带框输入）
 ├── agent/
-│   ├── agent.go            # Main agent loop, LLM streaming, tool dispatch
-│   ├── tools.go            # Tool registry: read/write/patch/shell/grep/list
-│   ├── tools_git.go        # Git tools: status/diff/log/commit
-│   ├── compressor.go       # Context compression and token estimation
-│   ├── session.go          # Session save/load/list/delete
-│   ├── memory.go           # Project memory (.codex.md) loader
-│   ├── approver.go         # Approval callbacks (interactive / auto)
-│   ├── prompt.go           # Arrow-key menu for approval prompts
-│   ├── prompt_tty.go       # Raw terminal mode helpers
-│   ├── spinner.go          # Braille loading spinner
-│   ├── diff.go             # Colored unified diff renderer
-│   ├── undo.go             # In-memory undo stack (max 20 entries)
-│   └── stats.go            # Per-turn and session token stats
+│   ├── agent.go            # 主循环、LLM 流式调用、工具分发
+│   ├── tools.go            # 工具注册：读/写/修改/Shell/搜索/列表
+│   ├── tools_git.go        # Git 工具：status/diff/log/commit
+│   ├── compressor.go       # 上下文压缩与 token 估算
+│   ├── session.go          # 会话保存/加载/列表/删除
+│   ├── memory.go           # 项目记忆（.codex.md）加载
+│   ├── approver.go         # 确认回调（交互式 / 自动）
+│   ├── prompt.go           # 方向键选择菜单
+│   ├── prompt_tty.go       # 原始终端模式工具函数
+│   ├── spinner.go          # Braille 加载动画
+│   ├── diff.go             # 彩色 unified diff 渲染
+│   ├── undo.go             # 内存撤销栈（最多 20 步）
+│   └── stats.go            # 单轮和会话 token 统计
 ├── llm/
-│   └── client.go           # OpenAI-compatible streaming SSE client
+│   └── client.go           # OpenAI 兼容流式 SSE 客户端
 └── config/
-    └── config.go           # Config load/save, provider management
+    └── config.go           # 配置加载/保存、提供商管理
 ```
 
-## Building for other platforms
+## 跨平台构建
 
 ```bash
 # Linux
-GOOS=linux GOARCH=amd64 go build -o codex-linux .
+GOOS=linux GOARCH=amd64 go build -o distracted-codex-linux .
 
 # macOS Apple Silicon
-GOOS=darwin GOARCH=arm64 go build -o codex-macos-arm64 .
+GOOS=darwin GOARCH=arm64 go build -o distracted-codex-macos-arm64 .
 
 # Windows
-GOOS=windows GOARCH=amd64 go build -o codex.exe .
+GOOS=windows GOARCH=amd64 go build -o distracted-codex.exe .
 ```
 
 ## License
