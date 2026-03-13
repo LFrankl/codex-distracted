@@ -41,6 +41,9 @@ type liner struct {
 
 	// Bracketed paste mode
 	inPaste bool // true while receiving bracketed paste content
+
+	// Multi-line box tracking (updated every redraw)
+	boxCursorAbove int // lines to go up from cursor position to reach top border
 }
 
 func newLiner(historyFile string) *liner {
@@ -615,62 +618,113 @@ func (l *liner) statusLine() string {
 	return "\033[2m↑↓ history  Ctrl+R search  Tab complete\033[0m"
 }
 
-// displayRunes converts buf runes to a display string, replacing \n with a dim ↵ marker.
-func displayRunes(runes []rune) string {
-	var sb strings.Builder
-	for _, r := range runes {
-		if r == '\n' {
-			sb.WriteString("\033[2m↵\033[0m")
-		} else {
-			sb.WriteRune(r)
-		}
-	}
-	return sb.String()
-}
-
-// redraw repaints the 3-line input box in-place.
+// redraw repaints the input box in-place.
+// The box height expands automatically for multi-line buffers.
 func (l *liner) redraw() {
 	w := termWidth()
 
-	line := displayRunes(l.buf)
-	beforeCursor := displayRunes(l.buf[:l.cursor])
+	// Split buffer into display lines.
+	contentLines := strings.Split(string(l.buf), "\n")
+	nContent := len(contentLines)
+
+	// Cursor's position within content: which line and column.
+	beforeLines := strings.Split(string(l.buf[:l.cursor]), "\n")
+	curLineIdx := len(beforeLines) - 1 // 0-based content line index of cursor
+	curLineText := beforeLines[len(beforeLines)-1]
 	promptW := visWidth(l.prompt)
-	cursorCol := promptW + visWidth(beforeCursor)
+	cursorCol := promptW + visWidth(curLineText)
 
-	status := l.statusLine()
-	topBorder := borderLine(w, "")
-	bottomBorder := borderLineLeft(w, status)
-
+	// Move to top border of previous box.
 	if l.boxDrawn {
-		fmt.Print("\033[1A\r")
+		if l.boxCursorAbove > 0 {
+			fmt.Printf("\033[%dA\r", l.boxCursorAbove)
+		} else {
+			fmt.Print("\r")
+		}
 	}
 	l.boxDrawn = true
 
-	fmt.Printf("\r\033[K\033[2m%s\033[0m\r\n", topBorder)
-	fmt.Printf("\r\033[K%s%s", l.prompt, line)
-	endCol := promptW + visWidth(line)
-	if endCol > cursorCol {
-		fmt.Printf("\033[%dD", endCol-cursorCol)
+	// Top border.
+	fmt.Printf("\r\033[K\033[2m%s\033[0m\r\n", borderLine(w, ""))
+
+	// Content lines.
+	indent := strings.Repeat(" ", promptW)
+	for i, cline := range contentLines {
+		if i == 0 {
+			fmt.Printf("\r\033[K%s%s", l.prompt, cline)
+		} else {
+			fmt.Printf("\r\033[K%s%s", indent, cline)
+		}
+		if i < nContent-1 {
+			fmt.Printf("\r\n")
+		}
 	}
-	fmt.Printf("\r\n\r\033[K%s", bottomBorder)
-	fmt.Print("\033[1A\r")
+
+	// Bottom border (drawn one line below the last content line).
+	status := l.statusLine()
+	fmt.Printf("\r\n\r\033[K\033[2m%s\033[0m", borderLineLeft(w, status))
+
+	// Cursor is now at the bottom border.
+	// Go up to the cursor's content line: (nContent - curLineIdx) lines up.
+	linesToGoUp := nContent - curLineIdx
+	if linesToGoUp > 0 {
+		fmt.Printf("\033[%dA\r", linesToGoUp)
+	} else {
+		fmt.Print("\r")
+	}
 	if cursorCol > 0 {
 		fmt.Printf("\033[%dC", cursorCol)
 	}
+
+	// Record how many lines above cursor the top border is (curLineIdx content lines + top border).
+	l.boxCursorAbove = curLineIdx + 1
 }
 
-// clearBox erases the border lines, leaving the input line dimmed as history.
+// clearBox erases the box, leaving a dim summary on the last content line.
 func (l *liner) clearBox() {
 	if !l.boxDrawn {
 		return
 	}
-	fmt.Print("\033[1A\r\033[K")
-	fmt.Print("\033[1B\r")
-	text := string(l.buf)
-	fmt.Printf("\r\033[K\033[2m❯ %s\033[0m", text)
-	fmt.Print("\r\n\r\033[K")
+
+	nNewlines := 0
+	for _, r := range l.buf {
+		if r == '\n' {
+			nNewlines++
+		}
+	}
+	nContent := nNewlines + 1
+
+	// Go to top border.
+	if l.boxCursorAbove > 0 {
+		fmt.Printf("\033[%dA\r\033[K", l.boxCursorAbove)
+	} else {
+		fmt.Print("\r\033[K")
+	}
+
+	// Clear each content line; show dim summary on the last one.
+	for i := 0; i < nContent; i++ {
+		fmt.Print("\033[1B\r\033[K")
+		if i == nContent-1 {
+			summary := bufSummary(l.buf)
+			fmt.Printf("\033[2m❯ %s\033[0m", summary)
+		}
+	}
+
+	// Clear bottom border and advance past the box.
+	fmt.Print("\033[1B\r\033[K")
 	fmt.Print("\033[1A\r\n")
 	l.boxDrawn = false
+}
+
+// bufSummary returns a one-line display for a (possibly multi-line) buffer.
+func bufSummary(buf []rune) string {
+	s := string(buf)
+	nl := strings.IndexRune(s, '\n')
+	if nl < 0 {
+		return s
+	}
+	extra := strings.Count(s[nl:], "\n") + 1
+	return s[:nl] + fmt.Sprintf(" \033[2m[+%d lines]\033[0m", extra)
 }
 
 // termWidth returns the current terminal width, defaulting to 80.
