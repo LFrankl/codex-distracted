@@ -39,6 +39,10 @@ STEP 2 — Run build/install commands.
   Correct:   shell_exec("cd /abs/path && go build ./...")
   Wrong:     shell_exec("cd backend") then shell_exec("go build ./...")
 
+  BACKGROUND SERVERS: append ' &' to start any long-running process.
+  NEVER run 'go run main.go', 'npm run dev', 'python app.py' without ' &' — they block forever.
+  Example: shell_exec("cd /abs/path && go run main.go &")
+
 STEP 3 — Fix errors if any, then stop.
   Read the exact error. Patch only the broken lines. Re-run. Do not rewrite the whole file.
 

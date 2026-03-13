@@ -48,6 +48,9 @@ Tool guidance:
 - semantic_search: search by meaning ("where is auth handled?"). Prefer over grep for exploration.
 - web_fetch: fetch any URL as plain text (docs, GitHub issues, API specs)
 - http_request: test local API endpoints (GET/POST)
+- shell_exec background: append ' &' for ANY long-running process — dev servers, 'go run',
+  'npm run dev', 'python app.py', etc. NEVER run these without '&'; they block forever.
+  After starting: wait 1-2s, then use http_request to verify the server responded.
 - move_file / delete_file: support undo via /undo
 - git_branch / git_pull / git_push: full branch lifecycle (pull/push require confirmation)
 - run_task: parallel sub-agents for independent work (separate dirs/modules).
@@ -95,6 +98,7 @@ git_branch, git_pull, git_push, web_fetch, file_outline, semantic_search, run_ta
 | Test a local API | http_request |
 | Independent parallel modules | run_task (multiple in ONE response) — expand ~ to real absolute path; pass exact absolute dir in task; sub-agents write files directly, no interactive CLIs |
 | Build/test verification | shell_exec |
+| Start a dev server / go run / npm run dev | shell_exec with ' &' suffix — NEVER run without &, it blocks |
 
 **BATCH RULE — applies to ALL tool calls:**
 Every independent tool call in a single step must be issued in ONE response.

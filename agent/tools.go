@@ -362,8 +362,15 @@ func (r *ToolRegistry) defShellExec() llm.Tool {
 	return llm.Tool{
 		Type: "function",
 		Function: llm.ToolFunction{
-			Name:        "shell_exec",
-			Description: "Execute a shell command and return stdout+stderr. Use for running tests, building, installing packages, etc.",
+			Name: "shell_exec",
+			Description: `Execute a shell command and return stdout+stderr.
+
+BACKGROUND EXECUTION: append ' &' to run a long-lived process without blocking.
+REQUIRED for: dev servers, 'go run', 'npm run dev', any process that stays running.
+Example: shell_exec("cd /abs/path && go run main.go &")
+Returns immediately with the PID. Use http_request to verify the server started.
+
+Use for: running tests, building, installing packages, starting servers.`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
