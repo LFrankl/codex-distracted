@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -104,7 +105,18 @@ func NewClient(baseURL, apiKey, model string) *Client {
 		apiKey:  apiKey,
 		model:   model,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			// No client-level timeout — streaming responses can take arbitrarily long.
+			// Connection/TLS timeouts are handled at the transport level.
+			// Request cancellation is via the context passed to each call.
+			Timeout: 0,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   15 * time.Second, // connection timeout
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second, // time to receive first byte
+			},
 		},
 	}
 }
