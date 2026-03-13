@@ -66,6 +66,16 @@
 
 ---
 
+## 2024-03 · dev server 阻塞终端
+
+**问题**：agent 执行 `go run main.go` / `npm run dev` 时不加 `&`，命令永久阻塞，会话卡死。
+
+**根本原因**：`shell_exec` 工具描述和系统提示词均未提及后台执行，LLM 不知道需要加 `&`。
+
+**解决方案**：三处同步修改：① `shell_exec` 工具 description 明确说明 `&` 是长期进程的**必选项**，并给出示例；② `systemPrompt` 加规则：启动 dev server / `go run` / `npm run dev` 等**必须**加 `&`，启动后用 `http_request` 验证；③ `subAgentPrompt` STEP 2 加同样规则。
+
+---
+
 ## 2024-03 · 子 agent 仍在执行 mkdir + 写出破损代码
 
 **问题**：专用 subAgentPrompt 加入后，子 agent 仍然：①用 `mkdir` 建目录（提示词规则被 LLM 忽略）；②写出缺少 import 的 Go 代码，再打两次补丁才能编译，每次都多一个 LLM 往返。
