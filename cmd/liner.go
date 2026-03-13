@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -21,7 +22,10 @@ type liner struct {
 	buf         []rune
 	cursor      int
 	prompt      string
+	statusBar   string // hint shown in bottom border
 	reader      *bufio.Reader
+	lastCtrlC   time.Time
+	boxDrawn    bool // whether the 3-line box is currently on screen
 }
 
 func newLiner(historyFile string) *liner {
@@ -29,6 +33,7 @@ func newLiner(historyFile string) *liner {
 		historyFile: historyFile,
 		histPos:     -1,
 		reader:      bufio.NewReaderSize(os.Stdin, 256),
+		statusBar:   "esc to interrupt  ↑↓ history",
 	}
 	l.loadHistory()
 	return l
@@ -101,32 +106,42 @@ func (l *liner) Readline() (string, error) {
 	l.buf = l.buf[:0]
 	l.cursor = 0
 	l.histPos = -1
+	l.boxDrawn = false
 	l.redraw()
 
 	for {
 		r, err := l.readNext()
 		if err != nil {
-			fmt.Print("\r\n")
+			l.clearBox()
 			return "", fmt.Errorf("EOF")
 		}
 
 		switch r {
 		case '\r', '\n': // Enter
 			line := string(l.buf)
-			fmt.Print("\r\n")
+			l.clearBox()
 			if line != "" {
 				l.addHistory(line)
 			}
 			return line, nil
 
 		case 3: // Ctrl-C
-			fmt.Print("^C\r\n")
+			now := time.Now()
+			if !l.lastCtrlC.IsZero() && now.Sub(l.lastCtrlC) < 1500*time.Millisecond {
+				l.clearBox()
+				return "", fmt.Errorf("EOF")
+			}
+			l.lastCtrlC = now
 			l.buf = l.buf[:0]
 			l.cursor = 0
+			l.boxDrawn = false
 			l.redraw()
+			// print hint below box
+			// Write hint on bottom border row, then return to input line.
+			fmt.Print("\r\n\r\033[K\033[2m(press Ctrl+C again to exit)\033[0m\033[1A\r")
 
 		case 4: // Ctrl-D
-			fmt.Print("\r\n")
+			l.clearBox()
 			return "", fmt.Errorf("EOF")
 
 		case 127, 8: // Backspace / DEL
@@ -255,22 +270,87 @@ func (l *liner) readNext() (rune, error) {
 	return 0, nil
 }
 
-// redraw repaints the current input line in-place.
+// redraw repaints the 3-line input box in-place.
+// Invariant: cursor is on the input line (row 2) when this function returns.
 func (l *liner) redraw() {
+	w := termWidth()
+
 	line := string(l.buf)
 	beforeCursor := string(l.buf[:l.cursor])
-
 	promptW := visWidth(l.prompt)
-	cursorW := promptW + visWidth(beforeCursor)
-	totalW := promptW + visWidth(line)
+	cursorCol := promptW + visWidth(beforeCursor)
 
-	// \r go to col 0, \033[K erase to EOL
-	fmt.Printf("\r\033[K%s%s", l.prompt, line)
+	topBorder := borderLine(w, "")
+	bottomBorder := borderLine(w, l.statusBar)
 
-	// Move cursor back to its position
-	if diff := totalW - cursorW; diff > 0 {
-		fmt.Printf("\033[%dD", diff)
+	if l.boxDrawn {
+		// Cursor is on input line. Jump up 1 to overwrite from top border.
+		fmt.Print("\033[1A\r")
 	}
+	l.boxDrawn = true
+
+	// Row 1: top border — print then move down (cursor → row 2 / input line)
+	fmt.Printf("\r\033[K\033[2m%s\033[0m\r\n", topBorder)
+	// Row 2: input line — print but stay here (no trailing \r\n yet)
+	fmt.Printf("\r\033[K%s%s", l.prompt, line)
+	// Position cursor within the input line.
+	endCol := promptW + visWidth(line)
+	if endCol > cursorCol {
+		fmt.Printf("\033[%dD", endCol-cursorCol)
+	}
+	// Now move down to row 3 and print bottom border, then come back up.
+	fmt.Printf("\r\n\r\033[K\033[2m%s\033[0m", bottomBorder)
+	// Return to input line.
+	fmt.Print("\033[1A\r")
+	if cursorCol > 0 {
+		fmt.Printf("\033[%dC", cursorCol)
+	}
+}
+
+// clearBox erases the border lines, leaving the input line dimmed as history.
+// Precondition: cursor is on the input line (row 2). Invariant from redraw().
+func (l *liner) clearBox() {
+	if !l.boxDrawn {
+		return
+	}
+	// Clear top border.
+	fmt.Print("\033[1A\r\033[K") // up 1, erase top border
+	fmt.Print("\033[1B\r")       // back down to input line
+
+	// Redraw input line as dimmed history — strip prompt ANSI and reprint dim.
+	text := string(l.buf)
+	fmt.Printf("\r\033[K\033[2m❯ %s\033[0m", text)
+
+	// Clear bottom border.
+	fmt.Print("\r\n\r\033[K")  // down to bottom border, erase it
+	fmt.Print("\033[1A\r\n")   // up to input line, then past it
+	l.boxDrawn = false
+}
+
+// termWidth returns the current terminal width, defaulting to 80.
+func termWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return w
+}
+
+// borderLine builds a full-width line of ─ chars with an optional right-aligned hint.
+func borderLine(w int, hint string) string {
+	hintW := visWidth(hint)
+	dashes := w
+	if hintW > 0 {
+		dashes = w - hintW - 2
+		if dashes < 1 {
+			dashes = 1
+		}
+	}
+	line := strings.Repeat("─", dashes)
+	if hintW > 0 {
+		line += "  " + hint
+	}
+	return line
 }
 
 func (l *liner) fallbackReadline() (string, error) {

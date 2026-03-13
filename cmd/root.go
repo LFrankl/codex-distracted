@@ -138,9 +138,9 @@ func runAgent(cmd *cobra.Command, args []string) error {
 func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 	promptFn := func() string {
 		if ag.IsThorough() {
-			return "\033[1;32mYou\033[0m \033[35m[thorough]\033[0m\033[1;32m:\033[0m "
+			return "\033[35m❯\033[0m "
 		}
-		return "\033[1;32mYou:\033[0m "
+		return "\033[1;32m❯\033[0m "
 	}
 
 	rl := newLiner(defaultHistoryFile())
@@ -150,6 +150,7 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 	fmt.Println("\033[2mType your request · /help for commands\033[0m")
 
 	for {
+		rl.SetPrompt(promptFn())
 		line, err := rl.Readline()
 		if err != nil { // EOF or interrupt
 			fmt.Println()
@@ -235,7 +236,6 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 			}
 		}
 		cancel()
-		fmt.Println()
 	}
 }
 

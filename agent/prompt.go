@@ -34,21 +34,28 @@ func Prompt(title string, choices []Choice, defaultIdx int) int {
 		selected = 0
 	}
 
+	totalLines := len(choices) + 2 // title + choices + hint
+	drawn := false
+
 	render := func() {
-		// Move cursor up by number of printed lines then redraw
+		if drawn {
+			// Move cursor back to the title line.
+			// After the previous render, cursor is on the hint line (no trailing \r\n).
+			// Hint line is (totalLines-1) lines below the title line.
+			fmt.Printf("\033[%dA\r", totalLines-1)
+		}
+		drawn = true
+
 		fmt.Printf("\r\033[K%s\r\n", title)
 		for i, c := range choices {
 			if i == selected {
-				fmt.Printf("\r  \033[1;36m▸ %s\033[0m\r\n", c.Label)
+				fmt.Printf("\r\033[K  \033[1;36m▸ %s\033[0m\r\n", c.Label)
 			} else {
-				fmt.Printf("\r    %s\r\n", c.Label)
+				fmt.Printf("\r\033[K    %s\r\n", c.Label)
 			}
 		}
-		fmt.Printf("\033[2m  ↑↓ move  Enter confirm  1-%d jump\033[0m", len(choices))
-		// Move cursor back to top of menu so next render overwrites cleanly
-		// Lines printed: 1 (title) + len(choices) + 1 (hint)
-		lines := len(choices) + 2
-		fmt.Printf("\033[%dA", lines)
+		// Hint line — no trailing \r\n; cursor stays here until next render or clear.
+		fmt.Printf("\r\033[K\033[2m  ↑↓ move  Enter confirm  1-%d jump\033[0m", len(choices))
 	}
 
 	render()
@@ -63,12 +70,11 @@ func Prompt(title string, choices []Choice, defaultIdx int) int {
 
 		switch {
 		case n == 1 && (b[0] == '\r' || b[0] == '\n'):
-			// Clear the menu before returning
-			clearMenu(len(choices) + 2)
+			clearMenu(totalLines)
 			return selected
 
 		case n == 1 && b[0] == 3: // Ctrl-C
-			clearMenu(len(choices) + 2)
+			clearMenu(totalLines)
 			return -1
 
 		case n >= 3 && b[0] == '\033' && b[1] == '[' && b[2] == 'A': // ↑
@@ -92,16 +98,24 @@ func Prompt(title string, choices []Choice, defaultIdx int) int {
 			render()
 		}
 	}
-	clearMenu(len(choices) + 2)
+	clearMenu(totalLines)
 	return selected
 }
 
-// clearMenu moves down past the menu and erases it.
+// clearMenu erases all menu lines in place.
+// Cursor must be on the hint (last) line when called.
+// After return, cursor is on the title line (first line of where the menu was).
 func clearMenu(lines int) {
-	// Move down to below the menu, then erase each line going up
-	fmt.Printf("\033[%dB", lines)
-	for i := 0; i < lines; i++ {
-		fmt.Printf("\r\033[K\033[1A")
+	// Cursor is on the last line (hint). Move to title line first.
+	if lines > 1 {
+		fmt.Printf("\033[%dA\r", lines-1)
+	} else {
+		fmt.Print("\r")
 	}
-	fmt.Printf("\r\033[K")
+	// Clear each line and advance.
+	for i := 0; i < lines; i++ {
+		fmt.Printf("\r\033[K\r\n")
+	}
+	// Move back up to the title line position.
+	fmt.Printf("\033[%dA\r", lines)
 }

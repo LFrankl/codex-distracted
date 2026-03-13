@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"codex/llm"
 )
@@ -369,9 +371,28 @@ func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 	cmd := exec.Command("bash", "-c", args.Command)
 	cmd.Dir = workDir
 
+	// Background command (ends with &): detach and return immediately.
+	if strings.HasSuffix(strings.TrimSpace(args.Command), "&") {
+		cmd.Stdin = nil
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		if err := cmd.Start(); err != nil {
+			return ToolResult{Content: "failed to start: " + err.Error(), IsError: true}
+		}
+		return ToolResult{Content: fmt.Sprintf("started in background (pid %d)", cmd.Process.Pid)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(args.TimeoutSeconds)*time.Second)
+	defer cancel()
+	cmd = exec.CommandContext(ctx, "bash", "-c", args.Command)
+	cmd.Dir = workDir
+
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 
+	if ctx.Err() == context.DeadlineExceeded {
+		return ToolResult{Content: fmt.Sprintf("timed out after %ds\n\n%s", args.TimeoutSeconds, result), IsError: true}
+	}
 	if err != nil {
 		if result == "" {
 			result = err.Error()
