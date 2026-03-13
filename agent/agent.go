@@ -23,6 +23,9 @@ STRICT RULES — violating any of these is wrong:
 8. If the user's message IS a shell command (e.g. "ls", "ls -la", "pwd", "cat foo.go",
    "go build", "npm install"), run it immediately with shell_exec — no explanation needed.
    Do NOT try to translate it into list_files or read_file; just execute it.
+9. If patch_file fails with "old_str not found", the error message includes the current
+   file content. Use THAT content to construct the correct old_str. Do NOT guess or retry
+   with a different old_str without reading the actual current content first.
 
 Examples:
 - User: "ls"            → shell_exec("ls"), done.
@@ -71,6 +74,8 @@ Guardrails that apply even in thorough mode:
 - Do NOT commit unless explicitly asked.
 - Do NOT refactor code unrelated to the task.
 - One implementation per function — no variant zoo.
+- If patch_file fails with "old_str not found", the error includes the current file content.
+  Use THAT content to construct the correct old_str. Never retry blindly with a different guess.
 
 Working directory: %s`
 
@@ -181,7 +186,7 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 			return fmt.Errorf("LLM error: %w", err)
 		}
 
-		// Add assistant message to history
+		// Add assistant message to history (trim long text replies)
 		assistantMsg := llm.Message{Role: "assistant"}
 		if response != "" {
 			assistantMsg.Content = response
@@ -189,7 +194,7 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 		if len(toolCalls) > 0 {
 			assistantMsg.ToolCalls = toolCalls
 		}
-		a.messages = append(a.messages, assistantMsg)
+		a.messages = append(a.messages, trimAssistantContent(assistantMsg))
 
 		// No tool calls = done
 		if len(toolCalls) == 0 {
@@ -202,11 +207,21 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 			result := a.tools.Execute(tc.Function.Name, tc.Function.Arguments)
 			a.printToolResult(tc.Function.Name, result)
 
+			// Only truncate shell output — file content must be stored verbatim
+			// so the LLM can construct accurate old_str for patch_file.
+			content := result.Content
+			if tc.Function.Name == "shell_exec" || tc.Function.Name == "grep_files" {
+				const maxShellRunes = 2000
+				if runes := []rune(content); len(runes) > maxShellRunes {
+					content = string(runes[:maxShellRunes]) + "\n…(truncated)"
+				}
+			}
+
 			a.messages = append(a.messages, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
 				Name:       tc.Function.Name,
-				Content:    result.Content,
+				Content:    content,
 			})
 		}
 	}

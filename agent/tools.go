@@ -609,6 +609,17 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 		patched, err = patchByLines(original, args.StartLine, args.EndLine, args.NewContent)
 	}
 	if err != nil {
+		// For old_str not found, include the current file content so the LLM
+		// can see the real state and construct a correct old_str without re-reading.
+		if useStrMode && strings.Contains(err.Error(), "not found") {
+			return ToolResult{
+				Content: fmt.Sprintf(
+					"%s\n\nCurrent content of %s:\n%s",
+					err.Error(), args.Path, original,
+				),
+				IsError: true,
+			}
+		}
 		return ToolResult{Content: err.Error(), IsError: true}
 	}
 
