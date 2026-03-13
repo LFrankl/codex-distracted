@@ -25,13 +25,17 @@ Rules:
 - Sub-agents cannot spawn further agents.
 - Do NOT use for tasks that depend on each other's output.
 
+CRITICAL — ALWAYS specify absolute paths in the task description:
+- Tell the sub-agent the EXACT absolute directory, e.g. "/Users/alice/myproject/backend".
+- The sub-agent will use these absolute paths in every write_file and shell_exec call.
+- Never give relative paths or tilde paths like "~/myproject" — expand them to full paths first.
+
 CRITICAL — project scaffolding in sub-agents:
 - NEVER use interactive CLIs: npm create, yarn create, vite, create-react-app, cargo init,
   django-admin startproject, etc. They require stdin and will hang indefinitely.
-- ALWAYS write project files directly with write_file (package.json, vite.config.ts,
-  src/main.ts, go.mod, main.go, etc.) then run only non-interactive commands
-  (npm install, go mod tidy, go build).
-- Batch ALL write_file calls in a single response — do not write one file and wait.`,
+- Sub-agents write ALL project files directly with write_file in ONE batch response,
+  then run non-interactive commands (npm install, go mod tidy, go build).
+- write_file creates parent directories automatically — no mkdir needed.`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
