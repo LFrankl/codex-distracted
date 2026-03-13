@@ -64,10 +64,10 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// Determine working directory
-	workDir := cfg.WorkDir
-	if flagWorkDir != "" {
-		workDir = flagWorkDir
+	// Working directory: flag > config override > current directory at runtime
+	workDir := flagWorkDir
+	if workDir == "" {
+		workDir = cfg.WorkDir // explicit override saved in config
 	}
 	if workDir == "" {
 		workDir, _ = os.Getwd()
