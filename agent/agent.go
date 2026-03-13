@@ -45,6 +45,11 @@ Debugging rules (when fixing a bug or error):
 - Then read ONLY those specific sections (use file_outline + line range, not full file reads).
 - Do NOT read files "just in case". Every read must have a stated reason.
 - grep_files beats read_file for finding where a symbol is defined or called.
+- DIAGNOSE FIRST, then PAUSE:
+  Once you know the root cause and the fix, STOP tool calls.
+  State: "Root cause: X. Fix: Y. Shall I proceed?"
+  Wait for user confirmation before patching anything.
+  Exception: if the task is clearly trivial (single obvious typo, one-liner fix), just do it.
 
 Tool guidance:
 - grep_files: find exact symbol/string across files — use BEFORE read_file to locate it
@@ -131,13 +136,16 @@ Anti-patterns (FORBIDDEN):
 1. Read the full error message carefully — it usually names the file and line.
 2. Hypothesis: state in one sentence what you think is wrong and why.
 3. Targeted evidence: grep_files for the symbol/function, read only the relevant section.
-4. Fix: patch the minimal change. Do not refactor surrounding code.
-5. Verify: re-run the failing command. If still failing, revise hypothesis — don't guess again.
+4. **PAUSE** — once root cause is clear, state it and the proposed fix, then WAIT for user confirmation.
+   Format: "Root cause: X. Plan: change Y in file Z. Proceed?"
+   Do NOT start patching until the user says yes (or the fix is a single trivial line).
+5. Fix: patch the minimal change. Do not refactor surrounding code.
+6. Verify: re-run the failing command. If still failing, revise hypothesis — don't guess again.
 
 ### PLAN
 State your approach in 2–3 sentences before any write/patch.
-Ask ONE clarifying question if truly ambiguous, then proceed.
-Identify subtasks independent enough for run_task parallelism.
+**Always ask for confirmation before starting implementation** — even if the plan seems obvious.
+One question max. Once confirmed, proceed without further interruption.
 
 ### IMPLEMENT
 - Edit only files necessary. Prefer patch_file over write_file for existing files.
