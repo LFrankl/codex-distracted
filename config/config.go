@@ -69,6 +69,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	// Never use a persisted WorkDir — always resolve at runtime from os.Getwd().
+	// Old config files may contain a stale path from a previous session.
+	cfg.WorkDir = ""
+
 	// Merge builtins (don't overwrite user-defined)
 	for name, p := range builtinProviders {
 		if _, exists := cfg.Providers[name]; !exists {

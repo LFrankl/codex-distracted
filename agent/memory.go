@@ -10,23 +10,16 @@ import (
 
 const memoryFile = ".codex.md"
 
-// loadProjectMemory looks for .codex.md in workDir (and parent dirs up to 3 levels).
-// Returns the file content, or "" if not found.
+// loadProjectMemory looks for .codex.md only in workDir itself.
+// Searching parent dirs caused wrong memory files to be loaded when running
+// the binary from a directory that is a child of another project.
 func loadProjectMemory(workDir string) (content, foundPath string) {
-	dir := workDir
-	for range 3 {
-		path := filepath.Join(dir, memoryFile)
-		data, err := os.ReadFile(path)
-		if err == nil && len(data) > 0 {
-			return string(data), path
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
+	path := filepath.Join(workDir, memoryFile)
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return "", ""
 	}
-	return "", ""
+	return string(data), path
 }
 
 // printMemoryLoaded writes a notice to out when project memory is found.
