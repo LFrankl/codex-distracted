@@ -19,12 +19,13 @@ type ToolResult struct {
 
 // ToolRegistry maps tool names to their definitions and handlers
 type ToolRegistry struct {
-	workDir string
-	defs    []llm.Tool
+	workDir  string
+	defs     []llm.Tool
+	approver Approver
 }
 
-func NewToolRegistry(workDir string) *ToolRegistry {
-	r := &ToolRegistry{workDir: workDir}
+func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
+	r := &ToolRegistry{workDir: workDir, approver: approver}
 	r.defs = []llm.Tool{
 		r.defReadFile(),
 		r.defWriteFile(),
@@ -336,6 +337,12 @@ func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 		args.TimeoutSeconds = 30
 	}
 
+	// Show command and request approval
+	fmt.Printf("\n\033[2m  $ %s\033[0m\n", args.Command)
+	if !r.approver("Execute shell command", args.Command) {
+		return ToolResult{Content: "shell_exec cancelled by user", IsError: true}
+	}
+
 	workDir := r.workDir
 	if args.WorkingDir != "" {
 		workDir = r.resolvePath(args.WorkingDir)
@@ -531,6 +538,25 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 	}
 	if !useLineMode && !useStrMode {
 		return ToolResult{Content: "provide old_str (string mode) or start_line+end_line (line mode)", IsError: true}
+	}
+
+	// Show diff preview before applying
+	fileLines := splitLines(original)
+	fmt.Println()
+	if useStrMode {
+		startLine := findLineNumber(original, args.OldStr)
+		PrintDiff(os.Stdout, args.Path, splitLines(args.OldStr), splitLines(args.NewStr), startLine, 3)
+	} else {
+		endLine := args.EndLine
+		if endLine > len(fileLines) {
+			endLine = len(fileLines)
+		}
+		PrintDiffWithContext(os.Stdout, args.Path, fileLines, splitLines(args.NewContent), args.StartLine, endLine, 3)
+	}
+	fmt.Println()
+
+	if !r.approver("Apply patch", args.Path) {
+		return ToolResult{Content: "patch_file cancelled by user", IsError: true}
 	}
 
 	var patched string

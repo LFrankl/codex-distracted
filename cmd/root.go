@@ -31,15 +31,17 @@ Examples:
 }
 
 var (
-	flagProvider string
-	flagWorkDir  string
-	flagModel    string
+	flagProvider    string
+	flagWorkDir     string
+	flagModel       string
+	flagAutoApprove bool
 )
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&flagProvider, "provider", "p", "", "Provider to use (overrides config)")
 	rootCmd.PersistentFlags().StringVarP(&flagWorkDir, "dir", "d", "", "Working directory (defaults to current dir)")
 	rootCmd.PersistentFlags().StringVarP(&flagModel, "model", "m", "", "Model to use (overrides provider default)")
+	rootCmd.PersistentFlags().BoolVarP(&flagAutoApprove, "auto-approve", "y", false, "Skip confirmation prompts for shell and patch actions")
 
 	rootCmd.AddCommand(configCmd())
 }
@@ -76,11 +78,20 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		model = flagModel
 	}
 
-	client := llm.NewClient(provider.BaseURL, provider.APIKey, model)
-	ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout)
+	approver := agent.InteractiveApprover()
+	if flagAutoApprove {
+		approver = agent.AutoApprover()
+	}
 
-	fmt.Fprintf(os.Stdout, "\033[2m[Codex] Provider: %s | Model: %s | Dir: %s\033[0m\n",
-		provider.Name, model, workDir)
+	client := llm.NewClient(provider.BaseURL, provider.APIKey, model)
+	ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver)
+
+	approveNote := "interactive"
+	if flagAutoApprove {
+		approveNote = "auto-approve"
+	}
+	fmt.Fprintf(os.Stdout, "\033[2m[Codex] Provider: %s | Model: %s | Dir: %s | Approve: %s\033[0m\n",
+		provider.Name, model, workDir, approveNote)
 
 	// One-shot mode: prompt provided as arg
 	if len(args) > 0 {

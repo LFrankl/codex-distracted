@@ -34,10 +34,10 @@ type Agent struct {
 	out      io.Writer
 }
 
-func New(client *llm.Client, workDir string, maxSteps int, out io.Writer) *Agent {
+func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approver Approver) *Agent {
 	return &Agent{
 		client:   client,
-		tools:    NewToolRegistry(workDir),
+		tools:    NewToolRegistry(workDir, approver),
 		maxSteps: maxSteps,
 		out:      out,
 	}
