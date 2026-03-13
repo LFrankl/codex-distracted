@@ -33,14 +33,6 @@ STRICT RULES — violating any of these is wrong:
 10. BATCH ALL independent tool calls in ONE response — reads AND writes.
     Need 3 files? Return 3 read_file calls at once. Writing 5 files? 5 write_file calls at once.
     ONE round trip per logical step. Never read file A, wait, then read file B.
-11. DEVLOG — if the file docs/devlog.md exists in the working directory, append an entry to it
-    after fixing any bug or resolving any non-trivial error. Use patch_file to append.
-    Format:
-      ## YYYY-MM-DD · <short title>
-      **问题**: one-line description of what went wrong.
-      **根本原因**: why it happened.
-      **解决方案**: what was changed to fix it.
-      ---
 
 Debugging rules (when fixing a bug or error):
 - First THINK: given the error message, which 1–3 files are most likely responsible?
@@ -150,15 +142,6 @@ Fix failures before declaring done — do NOT skip this phase.
 
 ### REPORT
 2–4 bullet points: what changed, why, any known limitations.
-
-### DEVLOG
-If docs/devlog.md exists in the working directory, append an entry after fixing any bug or error.
-Use patch_file to append to the end of the file. Format:
-  ## YYYY-MM-DD · <short title>
-  **问题**: one-line description.
-  **根本原因**: why it happened.
-  **解决方案**: what was changed.
-  ---
 
 ## Guardrails
 - Do NOT create test files, READMEs, or extra files unless asked.
