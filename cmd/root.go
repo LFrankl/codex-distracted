@@ -38,6 +38,7 @@ var (
 	flagAutoApprove bool
 	flagSession     string
 	flagSaveAs      string
+	flagThorough    bool
 )
 
 func init() {
@@ -47,6 +48,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&flagAutoApprove, "auto-approve", "y", false, "Skip confirmation prompts for shell and patch actions")
 	rootCmd.PersistentFlags().StringVarP(&flagSession, "session", "s", "", "Resume a saved session by ID")
 	rootCmd.PersistentFlags().StringVar(&flagSaveAs, "save-as", "", "Auto-save session on exit with this name")
+	rootCmd.PersistentFlags().BoolVar(&flagThorough, "thorough", false, "Thorough mode: explore codebase, run tests, verify changes")
 
 	rootCmd.AddCommand(configCmd(), sessionCmd())
 }
@@ -89,7 +91,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	}
 
 	client := llm.NewClient(provider.BaseURL, provider.APIKey, model)
-	ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver)
+	ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver, flagThorough)
 
 	// Resume a saved session if --session is set
 	if flagSession != "" {
@@ -102,12 +104,15 @@ func runAgent(cmd *cobra.Command, args []string) error {
 			s.ID, len(s.Messages))
 	}
 
-	autoMark := ""
+	marks := ""
 	if flagAutoApprove {
-		autoMark = "  \033[33m·  auto-approve\033[0m"
+		marks += "  \033[33m·  auto-approve\033[0m"
+	}
+	if flagThorough {
+		marks += "  \033[35m·  thorough\033[0m"
 	}
 	fmt.Fprintf(os.Stdout, "\033[1mCodex\033[0m  \033[2m·  %s  ·  %s%s\033[0m\n",
-		model, workDir, autoMark)
+		model, workDir, marks)
 
 	// One-shot mode
 	if len(args) > 0 {

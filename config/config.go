@@ -108,7 +108,7 @@ func (c *Config) GetCurrentProvider() (*Provider, error) {
 func defaultConfig() *Config {
 	wd, _ := os.Getwd()
 	cfg := &Config{
-		MaxSteps:  20,
+		MaxSteps:  10,
 		WorkDir:   wd,
 		Providers: make(map[string]Provider),
 	}

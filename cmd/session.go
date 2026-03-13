@@ -172,7 +172,7 @@ func sessionResumeCmd() *cobra.Command {
 
 			approver := agent.InteractiveApprover()
 			client := llm.NewClient(provider.BaseURL, provider.APIKey, model)
-			ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver)
+			ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver, false)
 			ag.SetMessages(s.Messages)
 
 			fmt.Printf("\033[1mCodex\033[0m  \033[2m·  %s  ·  %s\033[0m\n", model, workDir)

@@ -10,20 +10,33 @@ import (
 	"codex/llm"
 )
 
-const systemPrompt = `You are Codex, an AI coding assistant. You help users write, edit, understand, and debug code.
+const systemPrompt = `You are Codex, a concise coding assistant. Do exactly what was asked — nothing more.
 
-You have access to tools for reading/writing files and executing shell commands. Use them proactively to:
+Rules:
+- Only use tools when necessary. Do NOT explore files speculatively.
+- Only read a file if you need its exact content to complete the task.
+- Do NOT run tests, builds, or shell commands unless the user explicitly asks.
+- Do NOT commit, stage, or push git changes unless explicitly asked.
+- Do NOT add extra features, comments, or refactors beyond the request.
+- Answer questions directly without running tools first.
+- When editing: read the relevant section → patch → done.
+- When creating: write the file → done.
+
+Working directory: %s`
+
+const thoroughPrompt = `You are Codex, a thorough coding assistant. Work carefully and completely.
+
+You have access to tools for reading/writing files and executing shell commands. Use them to:
 - Explore the codebase before making changes
 - Verify your changes by running tests or builds
 - Create complete, working implementations
 
 Guidelines:
-- Always read existing files before editing them
+- Read existing files before editing them
 - After writing code, run tests or build to verify it works
-- Be concise in explanations but thorough in implementation
-- When asked to build a project, create all necessary files
+- Be thorough in implementation
 
-Current working directory: %s`
+Working directory: %s`
 
 // Agent orchestrates the LLM + tool loop
 type Agent struct {
@@ -33,15 +46,22 @@ type Agent struct {
 	maxSteps int
 	out      io.Writer
 	stats    SessionStats
+	prompt   string // system prompt template (uses %s for workDir)
 }
 
-func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approver Approver) *Agent {
-	return &Agent{
+func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approver Approver, thorough bool) *Agent {
+	a := &Agent{
 		client:   client,
 		tools:    NewToolRegistry(workDir, approver),
 		maxSteps: maxSteps,
 		out:      out,
 	}
+	if thorough {
+		a.prompt = thoroughPrompt
+	} else {
+		a.prompt = systemPrompt
+	}
+	return a
 }
 
 // Messages returns the current conversation history.
@@ -69,7 +89,7 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	// Initialize system prompt on first message
 	if len(a.messages) == 0 {
 		workDir := a.tools.workDir
-		prompt := fmt.Sprintf(systemPrompt, workDir)
+		prompt := fmt.Sprintf(a.prompt, workDir)
 
 		if mem, memPath := loadProjectMemory(workDir); mem != "" {
 			prompt += "\n\n## Project Memory (.codex.md)\n" + mem
