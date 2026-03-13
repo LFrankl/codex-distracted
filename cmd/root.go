@@ -168,6 +168,28 @@ func runREPL(ag *agent.Agent, bm25Idxer *agent.BM25Indexer, idxer *agent.Indexer
 	rl.SetPrompt(promptFn())
 	defer rl.Close()
 
+	// Tab completion for slash commands.
+	rl.SetCompletions([]string{
+		"/thorough", "/default", "/mode", "/reset", "/undo",
+		"/save", "/load", "/sessions",
+		"/index", "/index --force", "/index-status",
+		"/help",
+	})
+
+	// Dynamic status bar: show mode + session token stats.
+	rl.SetStatusFn(func() string {
+		mode := "default"
+		if ag.IsThorough() {
+			mode = "\033[35mthorough\033[0m"
+		}
+		stats := ag.Stats()
+		if stats.Total() > 0 {
+			return fmt.Sprintf("%s  ·  session ↑%d ↓%d  ·  ↑↓ history  Ctrl+R search  Tab complete",
+				mode, stats.PromptTokens, stats.CompletionTokens)
+		}
+		return fmt.Sprintf("%s  ·  ↑↓ history  Ctrl+R search  Tab complete", mode)
+	})
+
 	fmt.Println("\033[2mType your request · /help for commands\033[0m")
 
 	for {

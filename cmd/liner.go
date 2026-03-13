@@ -22,10 +22,22 @@ type liner struct {
 	buf         []rune
 	cursor      int
 	prompt      string
-	statusBar   string // hint shown in bottom border
+	statusFn    func() string // called each redraw for dynamic status bar content
 	reader      *bufio.Reader
 	lastCtrlC   time.Time
 	boxDrawn    bool // whether the 3-line box is currently on screen
+
+	// Tab completion
+	completions  []string
+	tabState     int    // cycles through matches on successive Tabs
+	tabPrefix    string // prefix at last Tab press
+	tabMatches   []string
+
+	// Ctrl+R reverse history search
+	searching    bool
+	searchQuery  string
+	searchMatch  int // index into history of current match (-1 = none)
+	searchSaved  []rune // original buffer before search
 }
 
 func newLiner(historyFile string) *liner {
@@ -33,14 +45,16 @@ func newLiner(historyFile string) *liner {
 		historyFile: historyFile,
 		histPos:     -1,
 		reader:      bufio.NewReaderSize(os.Stdin, 256),
-		statusBar:   "esc to interrupt  ↑↓ history",
+		searchMatch: -1,
 	}
 	l.loadHistory()
 	return l
 }
 
-func (l *liner) SetPrompt(p string) { l.prompt = p }
-func (l *liner) Close()             {}
+func (l *liner) SetPrompt(p string)              { l.prompt = p }
+func (l *liner) SetStatusFn(fn func() string)    { l.statusFn = fn }
+func (l *liner) SetCompletions(c []string)        { l.completions = c }
+func (l *liner) Close()                           {}
 
 // visWidth returns the terminal column width of a string,
 // stripping ANSI escapes and counting CJK as 2 columns.
@@ -69,21 +83,20 @@ func visWidth(s string) int {
 
 // isWide reports whether r occupies 2 terminal columns.
 func isWide(r rune) bool {
-	// CJK Unified Ideographs, Hiragana, Katakana, Hangul, full-width forms, etc.
 	return r >= 0x1100 && (
-		r <= 0x115F || // Hangul Jamo
-			(r >= 0x2E80 && r <= 0x303E) || // CJK Radicals
-			(r >= 0x3041 && r <= 0x33BF) || // Hiragana..CJK Compatibility
-			(r >= 0x3400 && r <= 0x4DBF) || // CJK Extension A
-			(r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
-			(r >= 0xA000 && r <= 0xA4CF) || // Yi
-			(r >= 0xAC00 && r <= 0xD7AF) || // Hangul Syllables
-			(r >= 0xF900 && r <= 0xFAFF) || // CJK Compatibility Ideographs
-			(r >= 0xFE10 && r <= 0xFE6F) || // CJK Compatibility Forms
-			(r >= 0xFF00 && r <= 0xFF60) || // Fullwidth Forms
-			(r >= 0xFFE0 && r <= 0xFFE6) || // Fullwidth Signs
-			(r >= 0x1F300 && r <= 0x1F9FF) || // Emoji
-			(r >= 0x20000 && r <= 0x2FFFD) || // CJK Extension B-F
+		r <= 0x115F ||
+			(r >= 0x2E80 && r <= 0x303E) ||
+			(r >= 0x3041 && r <= 0x33BF) ||
+			(r >= 0x3400 && r <= 0x4DBF) ||
+			(r >= 0x4E00 && r <= 0x9FFF) ||
+			(r >= 0xA000 && r <= 0xA4CF) ||
+			(r >= 0xAC00 && r <= 0xD7AF) ||
+			(r >= 0xF900 && r <= 0xFAFF) ||
+			(r >= 0xFE10 && r <= 0xFE6F) ||
+			(r >= 0xFF00 && r <= 0xFF60) ||
+			(r >= 0xFFE0 && r <= 0xFFE6) ||
+			(r >= 0x1F300 && r <= 0x1F9FF) ||
+			(r >= 0x20000 && r <= 0x2FFFD) ||
 			(r >= 0x30000 && r <= 0x3FFFD))
 }
 
@@ -107,6 +120,8 @@ func (l *liner) Readline() (string, error) {
 	l.cursor = 0
 	l.histPos = -1
 	l.boxDrawn = false
+	l.tabState = -1
+	l.searching = false
 	l.redraw()
 
 	for {
@@ -116,8 +131,22 @@ func (l *liner) Readline() (string, error) {
 			return "", fmt.Errorf("EOF")
 		}
 
+		// Any non-Tab key resets tab cycling state.
+		if r != runTab {
+			l.tabState = -1
+		}
+		// Any typing key exits search mode and keeps the current buffer.
+		if l.searching && r != runeCtrlR && r != '\r' && r != '\n' &&
+			r != 3 && r != 4 && r != runeEsc &&
+			r != 127 && r != 8 && r != runeBackspace {
+			l.exitSearch(true)
+		}
+
 		switch r {
 		case '\r', '\n': // Enter
+			if l.searching {
+				l.exitSearch(true)
+			}
 			line := string(l.buf)
 			l.clearBox()
 			if line != "" {
@@ -126,6 +155,11 @@ func (l *liner) Readline() (string, error) {
 			return line, nil
 
 		case 3: // Ctrl-C
+			if l.searching {
+				l.exitSearch(false)
+				l.redraw()
+				continue
+			}
 			now := time.Now()
 			if !l.lastCtrlC.IsZero() && now.Sub(l.lastCtrlC) < 1500*time.Millisecond {
 				l.clearBox()
@@ -136,35 +170,62 @@ func (l *liner) Readline() (string, error) {
 			l.cursor = 0
 			l.boxDrawn = false
 			l.redraw()
-			// print hint below box
-			// Write hint on bottom border row, then return to input line.
 			fmt.Print("\r\n\r\033[K\033[2m(press Ctrl+C again to exit)\033[0m\033[1A\r")
 
 		case 4: // Ctrl-D
 			l.clearBox()
 			return "", fmt.Errorf("EOF")
 
-		case 127, 8: // Backspace / DEL
+		case 127, 8, runeBackspace: // Backspace
+			if l.searching {
+				if len(l.searchQuery) > 0 {
+					l.searchQuery = l.searchQuery[:len(l.searchQuery)-1]
+					l.updateSearch()
+					l.redraw()
+				}
+				continue
+			}
 			if l.cursor > 0 {
 				l.buf = append(l.buf[:l.cursor-1], l.buf[l.cursor:]...)
 				l.cursor--
 				l.redraw()
 			}
 
-		case 21: // Ctrl-U
+		case 21: // Ctrl-U — clear line
 			l.buf = l.buf[:0]
 			l.cursor = 0
 			l.redraw()
 
-		case 1: // Ctrl-A
+		case 11: // Ctrl-K — delete to end of line
+			l.buf = l.buf[:l.cursor]
+			l.redraw()
+
+		case 1: // Ctrl-A / Home
 			l.cursor = 0
 			l.redraw()
 
-		case 5: // Ctrl-E
+		case 5: // Ctrl-E / End
 			l.cursor = len(l.buf)
 			l.redraw()
 
-		case 23: // Ctrl-W: delete word before cursor
+		case 2: // Ctrl-B — move left
+			if l.cursor > 0 {
+				l.cursor--
+				l.redraw()
+			}
+
+		case 6: // Ctrl-F — move right
+			if l.cursor < len(l.buf) {
+				l.cursor++
+				l.redraw()
+			}
+
+		case 12: // Ctrl-L — clear screen
+			l.boxDrawn = false
+			fmt.Print("\033[2J\033[H") // clear screen, move to top-left
+			l.redraw()
+
+		case 23: // Ctrl-W — delete word before cursor
 			i := l.cursor
 			for i > 0 && l.buf[i-1] == ' ' {
 				i--
@@ -176,10 +237,38 @@ func (l *liner) Readline() (string, error) {
 			l.cursor = i
 			l.redraw()
 
+		case runeCtrlR: // Ctrl-R — start/cycle reverse search
+			if !l.searching {
+				l.searchSaved = make([]rune, len(l.buf))
+				copy(l.searchSaved, l.buf)
+				l.searching = true
+				l.searchQuery = ""
+				l.searchMatch = -1
+			} else {
+				// Cycle to next older match.
+				l.cycleSearch()
+			}
+			l.redraw()
+
+		case runeEsc: // ESC — cancel search or no-op
+			if l.searching {
+				l.exitSearch(false)
+				l.redraw()
+			}
+
+		case runTab: // Tab — command completion
+			l.handleTab()
+
 		case runeUp: // ↑ history prev
+			if l.searching {
+				l.exitSearch(true)
+			}
 			l.historyPrev()
 
 		case runeDown: // ↓ history next
+			if l.searching {
+				l.exitSearch(true)
+			}
 			l.historyNext()
 
 		case runeRight: // → cursor right
@@ -194,6 +283,22 @@ func (l *liner) Readline() (string, error) {
 				l.redraw()
 			}
 
+		case runeWordRight: // Ctrl+Right — jump word right
+			l.cursor = wordRight(l.buf, l.cursor)
+			l.redraw()
+
+		case runeWordLeft: // Ctrl+Left — jump word left
+			l.cursor = wordLeft(l.buf, l.cursor)
+			l.redraw()
+
+		case runeHome: // Home
+			l.cursor = 0
+			l.redraw()
+
+		case runeEnd: // End
+			l.cursor = len(l.buf)
+			l.redraw()
+
 		case runeDelete: // Delete key
 			if l.cursor < len(l.buf) {
 				l.buf = append(l.buf[:l.cursor], l.buf[l.cursor+1:]...)
@@ -201,6 +306,15 @@ func (l *liner) Readline() (string, error) {
 			}
 
 		default:
+			if l.searching {
+				// In search mode, typing extends the query.
+				if r >= 32 && utf8.ValidRune(r) {
+					l.searchQuery += string(r)
+					l.updateSearch()
+					l.redraw()
+				}
+				continue
+			}
 			if r >= 32 && utf8.ValidRune(r) {
 				newBuf := make([]rune, len(l.buf)+1)
 				copy(newBuf, l.buf[:l.cursor])
@@ -214,13 +328,124 @@ func (l *liner) Readline() (string, error) {
 	}
 }
 
+// wordLeft returns the cursor position after jumping one word to the left.
+func wordLeft(buf []rune, cursor int) int {
+	i := cursor
+	for i > 0 && buf[i-1] == ' ' {
+		i--
+	}
+	for i > 0 && buf[i-1] != ' ' {
+		i--
+	}
+	return i
+}
+
+// wordRight returns the cursor position after jumping one word to the right.
+func wordRight(buf []rune, cursor int) int {
+	n := len(buf)
+	i := cursor
+	for i < n && buf[i] != ' ' {
+		i++
+	}
+	for i < n && buf[i] == ' ' {
+		i++
+	}
+	return i
+}
+
+// handleTab performs command completion if the buffer starts with '/'.
+func (l *liner) handleTab() {
+	if len(l.completions) == 0 {
+		return
+	}
+	input := string(l.buf[:l.cursor])
+	if !strings.HasPrefix(input, "/") {
+		return
+	}
+
+	// Rebuild match list if prefix changed.
+	if l.tabState < 0 || input != l.tabPrefix {
+		l.tabPrefix = input
+		l.tabMatches = l.tabMatches[:0]
+		for _, c := range l.completions {
+			if strings.HasPrefix(c, input) && c != input {
+				l.tabMatches = append(l.tabMatches, c)
+			}
+		}
+		l.tabState = -1
+	}
+	if len(l.tabMatches) == 0 {
+		return
+	}
+
+	l.tabState = (l.tabState + 1) % len(l.tabMatches)
+	completed := []rune(l.tabMatches[l.tabState])
+	// Replace everything up to cursor with the completion.
+	tail := l.buf[l.cursor:]
+	l.buf = append(completed, tail...)
+	l.cursor = len(completed)
+	l.redraw()
+}
+
+// Search mode helpers.
+
+func (l *liner) updateSearch() {
+	l.searchMatch = -1
+	if l.searchQuery == "" {
+		l.buf = append(l.buf[:0], l.searchSaved...)
+		l.cursor = len(l.buf)
+		return
+	}
+	for i := len(l.history) - 1; i >= 0; i-- {
+		if strings.Contains(l.history[i], l.searchQuery) {
+			l.searchMatch = i
+			l.buf = []rune(l.history[i])
+			l.cursor = len(l.buf)
+			return
+		}
+	}
+	// No match — keep showing query but leave buffer as-is.
+}
+
+func (l *liner) cycleSearch() {
+	if l.searchQuery == "" || l.searchMatch <= 0 {
+		return
+	}
+	for i := l.searchMatch - 1; i >= 0; i-- {
+		if strings.Contains(l.history[i], l.searchQuery) {
+			l.searchMatch = i
+			l.buf = []rune(l.history[i])
+			l.cursor = len(l.buf)
+			return
+		}
+	}
+}
+
+func (l *liner) exitSearch(keep bool) {
+	l.searching = false
+	if !keep {
+		l.buf = append(l.buf[:0], l.searchSaved...)
+		l.cursor = len(l.buf)
+	}
+	l.searchQuery = ""
+	l.searchMatch = -1
+}
+
 // Sentinel runes for escape sequences
 const (
-	runeUp     = rune(0x100001)
-	runeDown   = rune(0x100002)
-	runeLeft   = rune(0x100003)
-	runeRight  = rune(0x100004)
-	runeDelete = rune(0x100005)
+	runeUp        = rune(0x100001)
+	runeDown      = rune(0x100002)
+	runeLeft      = rune(0x100003)
+	runeRight     = rune(0x100004)
+	runeDelete    = rune(0x100005)
+	runeWordLeft  = rune(0x100006)
+	runeWordRight = rune(0x100007)
+	runeHome      = rune(0x100008)
+	runeEnd       = rune(0x100009)
+	runeCtrlR     = rune(0x10000A)
+	runeEsc       = rune(0x10000B)
+	runTab        = rune(0x100009 + 3) // 0x10000C
+	runeBackspace = rune(0x10000D)
 )
 
 // readNext reads one logical input event (rune or escape sequence) from stdin.
@@ -230,48 +455,134 @@ func (l *liner) readNext() (rune, error) {
 		return 0, err
 	}
 
+	switch r {
+	case '\t':
+		return runTab, nil
+	case 18: // Ctrl-R
+		return runeCtrlR, nil
+	}
+
 	if r != '\033' {
 		return r, nil
 	}
 
-	// ESC — try to read the rest of the escape sequence (non-blocking peek)
+	// ESC — try to read the rest of the escape sequence.
 	b1, err := l.reader.ReadByte()
-	if err != nil || b1 != '[' {
-		// bare ESC or unknown — ignore
-		return 0, nil
-	}
-
-	b2, err := l.reader.ReadByte()
 	if err != nil {
+		return runeEsc, nil // bare ESC
+	}
+
+	// ESC O sequences (SS3 — used by some terminals for Home/End/arrows)
+	if b1 == 'O' {
+		b2, err := l.reader.ReadByte()
+		if err != nil {
+			return runeEsc, nil
+		}
+		switch b2 {
+		case 'A':
+			return runeUp, nil
+		case 'B':
+			return runeDown, nil
+		case 'C':
+			return runeRight, nil
+		case 'D':
+			return runeLeft, nil
+		case 'H':
+			return runeHome, nil
+		case 'F':
+			return runeEnd, nil
+		}
 		return 0, nil
 	}
 
-	switch b2 {
-	case 'A':
-		return runeUp, nil
-	case 'B':
-		return runeDown, nil
-	case 'C':
-		return runeRight, nil
-	case 'D':
-		return runeLeft, nil
-	case '3': // ESC[3~  = Delete
-		l.reader.ReadByte() // consume '~'
-		return runeDelete, nil
-	default:
-		// Consume rest of unknown sequence (up to a letter)
-		for {
-			b, err := l.reader.ReadByte()
-			if err != nil || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~' {
-				break
+	// ESC [ sequences (CSI)
+	if b1 != '[' {
+		// ESC b / ESC f — Alt+Left/Right (some terminals)
+		if b1 == 'b' {
+			return runeWordLeft, nil
+		}
+		if b1 == 'f' {
+			return runeWordRight, nil
+		}
+		return runeEsc, nil
+	}
+
+	// Read parameter bytes then the final byte.
+	var params []byte
+	for {
+		b, err := l.reader.ReadByte()
+		if err != nil {
+			return 0, nil
+		}
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~' {
+			// Final byte.
+			switch b {
+			case 'A':
+				return runeUp, nil
+			case 'B':
+				return runeDown, nil
+			case 'C':
+				if hasModifier5(params) {
+					return runeWordRight, nil
+				}
+				return runeRight, nil
+			case 'D':
+				if hasModifier5(params) {
+					return runeWordLeft, nil
+				}
+				return runeLeft, nil
+			case 'H':
+				return runeHome, nil
+			case 'F':
+				return runeEnd, nil
+			case '~':
+				ps := string(params)
+				switch ps {
+				case "1", "7":
+					return runeHome, nil
+				case "4", "8":
+					return runeEnd, nil
+				case "3":
+					return runeDelete, nil
+				case "5":
+					return runeWordRight, nil // Ctrl+Right on some terms
+				case "6":
+					return runeWordLeft, nil  // Ctrl+Left on some terms
+				}
 			}
+			return 0, nil
+		}
+		params = append(params, b)
+	}
+}
+
+// hasModifier5 checks if params encode modifier ;5 (Ctrl key).
+// E.g. ESC[1;5C = Ctrl+Right.
+func hasModifier5(params []byte) bool {
+	s := string(params)
+	return strings.Contains(s, ";5") || strings.Contains(s, ";6") ||
+		s == "5" || s == "6"
+}
+
+// statusLine returns the content for the bottom border.
+func (l *liner) statusLine() string {
+	if l.searching {
+		indicator := "no match"
+		if l.searchMatch >= 0 {
+			indicator = fmt.Sprintf("match %d/%d", len(l.history)-l.searchMatch, len(l.history))
+		}
+		return fmt.Sprintf("\033[33msearch:\033[0m\033[2m %s  [%s]  ESC to cancel\033[0m",
+			l.searchQuery, indicator)
+	}
+	if l.statusFn != nil {
+		if s := l.statusFn(); s != "" {
+			return "\033[2m" + s + "\033[0m"
 		}
 	}
-	return 0, nil
+	return "\033[2m↑↓ history  Ctrl+R search  Tab complete\033[0m"
 }
 
 // redraw repaints the 3-line input box in-place.
-// Invariant: cursor is on the input line (row 2) when this function returns.
 func (l *liner) redraw() {
 	w := termWidth()
 
@@ -280,27 +591,22 @@ func (l *liner) redraw() {
 	promptW := visWidth(l.prompt)
 	cursorCol := promptW + visWidth(beforeCursor)
 
+	status := l.statusLine()
 	topBorder := borderLine(w, "")
-	bottomBorder := borderLine(w, l.statusBar)
+	bottomBorder := borderLineLeft(w, status)
 
 	if l.boxDrawn {
-		// Cursor is on input line. Jump up 1 to overwrite from top border.
 		fmt.Print("\033[1A\r")
 	}
 	l.boxDrawn = true
 
-	// Row 1: top border — print then move down (cursor → row 2 / input line)
 	fmt.Printf("\r\033[K\033[2m%s\033[0m\r\n", topBorder)
-	// Row 2: input line — print but stay here (no trailing \r\n yet)
 	fmt.Printf("\r\033[K%s%s", l.prompt, line)
-	// Position cursor within the input line.
 	endCol := promptW + visWidth(line)
 	if endCol > cursorCol {
 		fmt.Printf("\033[%dD", endCol-cursorCol)
 	}
-	// Now move down to row 3 and print bottom border, then come back up.
-	fmt.Printf("\r\n\r\033[K\033[2m%s\033[0m", bottomBorder)
-	// Return to input line.
+	fmt.Printf("\r\n\r\033[K%s", bottomBorder)
 	fmt.Print("\033[1A\r")
 	if cursorCol > 0 {
 		fmt.Printf("\033[%dC", cursorCol)
@@ -308,22 +614,16 @@ func (l *liner) redraw() {
 }
 
 // clearBox erases the border lines, leaving the input line dimmed as history.
-// Precondition: cursor is on the input line (row 2). Invariant from redraw().
 func (l *liner) clearBox() {
 	if !l.boxDrawn {
 		return
 	}
-	// Clear top border.
-	fmt.Print("\033[1A\r\033[K") // up 1, erase top border
-	fmt.Print("\033[1B\r")       // back down to input line
-
-	// Redraw input line as dimmed history — strip prompt ANSI and reprint dim.
+	fmt.Print("\033[1A\r\033[K")
+	fmt.Print("\033[1B\r")
 	text := string(l.buf)
 	fmt.Printf("\r\033[K\033[2m❯ %s\033[0m", text)
-
-	// Clear bottom border.
-	fmt.Print("\r\n\r\033[K")  // down to bottom border, erase it
-	fmt.Print("\033[1A\r\n")   // up to input line, then past it
+	fmt.Print("\r\n\r\033[K")
+	fmt.Print("\033[1A\r\n")
 	l.boxDrawn = false
 }
 
@@ -336,7 +636,7 @@ func termWidth() int {
 	return w
 }
 
-// borderLine builds a full-width line of ─ chars with an optional right-aligned hint.
+// borderLine builds a full-width line of ─ chars.
 func borderLine(w int, hint string) string {
 	hintW := visWidth(hint)
 	dashes := w
@@ -351,6 +651,16 @@ func borderLine(w int, hint string) string {
 		line += "  " + hint
 	}
 	return line
+}
+
+// borderLineLeft builds the bottom border with content left-aligned (for status).
+func borderLineLeft(w int, content string) string {
+	contentW := visWidth(content)
+	remaining := w - contentW
+	if remaining < 0 {
+		remaining = 0
+	}
+	return content + strings.Repeat("─", remaining)
 }
 
 func (l *liner) fallbackReadline() (string, error) {
