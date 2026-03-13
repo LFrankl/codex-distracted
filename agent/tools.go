@@ -24,13 +24,14 @@ type ToolResult struct {
 
 // ToolRegistry maps tool names to their definitions and handlers
 type ToolRegistry struct {
-	workDir  string
-	defs     []llm.Tool
-	approver Approver
-	undo     UndoStack
-	rag      *ragState   // nil when RAG is not available
-	client   *llm.Client // used by run_task to spawn sub-agents
-	depth    int         // 0 = main agent, 1 = sub-agent (run_task blocked)
+	workDir     string
+	defs        []llm.Tool
+	approver    Approver
+	undo        UndoStack
+	rag         *ragState   // nil when RAG is not available
+	client      *llm.Client // used by run_task to spawn sub-agents
+	depth       int         // 0 = main agent, 1 = sub-agent (run_task blocked)
+	preApproved bool        // set by agent loop for batch-approved concurrent patch execution
 }
 
 func NewToolRegistry(workDir string, approver Approver, client *llm.Client, depth int) *ToolRegistry {
@@ -767,11 +768,13 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 		}
 		fmt.Println()
 
-		if ok, instr := r.approver("Apply patches", args.Path); !ok {
-			if instr != "" {
-				return ToolResult{Content: "patch cancelled — user provided new instruction", Instruction: instr}
+		if !r.preApproved {
+			if ok, instr := r.approver("Apply patches", args.Path); !ok {
+				if instr != "" {
+					return ToolResult{Content: "patch cancelled — user provided new instruction", Instruction: instr}
+				}
+				return ToolResult{Content: "patch_file cancelled by user", IsError: true}
 			}
-			return ToolResult{Content: "patch_file cancelled by user", IsError: true}
 		}
 
 		r.undo.Push(path)
@@ -829,11 +832,13 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 	}
 	fmt.Println()
 
-	if ok, instr := r.approver("Apply patch", args.Path); !ok {
-		if instr != "" {
-			return ToolResult{Content: "patch cancelled — user provided new instruction", Instruction: instr}
+	if !r.preApproved {
+		if ok, instr := r.approver("Apply patch", args.Path); !ok {
+			if instr != "" {
+				return ToolResult{Content: "patch cancelled — user provided new instruction", Instruction: instr}
+			}
+			return ToolResult{Content: "patch_file cancelled by user", IsError: true}
 		}
-		return ToolResult{Content: "patch_file cancelled by user", IsError: true}
 	}
 
 	// Backup original before applying patch

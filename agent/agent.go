@@ -364,25 +364,32 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 		}
 		results := make([]tcResult, len(toolCalls))
 
-		// Determine which tools are safe to run concurrently (read-only or independent writes).
-		// Approval-gated tools (shell_exec, patch_file, git_commit) run serially to keep
-		// the approval prompt readable.
-		needsSerial := func(name string) bool {
+		// Tool classification:
+		//   parallel  — no approval needed (read_file, write_file, find_files, grep_files, …)
+		//   patchOnly — patch_file only; supports batch approval + concurrent execution
+		//   serial    — needs individual approval, one at a time (shell_exec, git ops, move, delete)
+		classifyTool := func(name string) string {
 			switch name {
-			case "shell_exec", "patch_file", "git_commit", "move_file", "delete_file":
-				return true
+			case "shell_exec", "git_commit", "git_pull", "git_push", "move_file", "delete_file":
+				return "serial"
+			case "patch_file":
+				return "patchOnly"
+			default:
+				return "parallel"
 			}
-			return false
 		}
 
-		// Split into serial and parallel groups preserving order.
-		// Run parallel group first (all at once), then serial ones in order.
-		// Simple approach: if ANY call needs serial, run all serially to preserve ordering.
-		anySerial := false
-		for _, tc := range toolCalls {
-			if needsSerial(tc.Function.Name) {
-				anySerial = true
-				break
+		classes := make([]string, len(toolCalls))
+		hasPatch, hasSerial, hasParallel := false, false, false
+		for i, tc := range toolCalls {
+			classes[i] = classifyTool(tc.Function.Name)
+			switch classes[i] {
+			case "serial":
+				hasSerial = true
+			case "patchOnly":
+				hasPatch = true
+			default:
+				hasParallel = true
 			}
 		}
 
@@ -401,29 +408,108 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 
 		var pendingInstruction string
 
-		if !anySerial && len(toolCalls) > 1 {
-			// All calls are safe to parallelize (write_file, read_file, find_files, etc.)
+		runParallel := func(indices []int) {
 			type indexedResult struct {
 				i      int
 				result ToolResult
 			}
-			ch := make(chan indexedResult, len(toolCalls))
-			for i, tc := range toolCalls {
-				i, tc := i, tc
+			ch := make(chan indexedResult, len(indices))
+			for _, i := range indices {
+				i, tc := i, toolCalls[i]
 				go func() {
 					ch <- indexedResult{i, a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)}
 				}()
 			}
-			for range toolCalls {
+			for range indices {
 				r := <-ch
 				results[r.i] = tcResult{tc: toolCalls[r.i], result: r.result}
 			}
-		} else {
+		}
+
+		// Case 1: only parallel tools (read_file, write_file, find_files, …) — all concurrent.
+		// Case 2: only patch_file calls — batch approval then concurrent.
+		// Case 3: mixed or serial present — run everything serially preserving order.
+		switch {
+		case !hasSerial && !hasPatch:
+			// All parallel tools.
+			if len(toolCalls) > 1 {
+				indices := make([]int, len(toolCalls))
+				for i := range indices {
+					indices[i] = i
+				}
+				runParallel(indices)
+			} else {
+				results[0] = tcResult{tc: toolCalls[0], result: a.tools.Execute(ctx, toolCalls[0].Function.Name, toolCalls[0].Function.Arguments)}
+			}
+
+		case !hasSerial && hasPatch && !hasParallel && len(toolCalls) > 1:
+			// All patch_file — batch approval then concurrent execution.
+			fmt.Printf("\n\033[1;33mApply %d patches?\033[0m\n", len(toolCalls))
+			if ok, instr := a.tools.approver(fmt.Sprintf("Apply %d patches", len(toolCalls)), ""); !ok {
+				if instr != "" {
+					pendingInstruction = instr
+					for i, tc := range toolCalls {
+						results[i] = tcResult{tc: tc, result: ToolResult{Content: "cancelled: user provided new instructions"}}
+					}
+				} else {
+					for i, tc := range toolCalls {
+						results[i] = tcResult{tc: tc, result: ToolResult{Content: "patch_file cancelled by user", IsError: true}}
+					}
+				}
+				break
+			}
+			a.tools.preApproved = true
+			indices := make([]int, len(toolCalls))
+			for i := range indices {
+				indices[i] = i
+			}
+			runParallel(indices)
+			a.tools.preApproved = false
+
+		case !hasSerial && hasPatch && hasParallel:
+			// Mixed parallel + patch: run parallel group first, then patches with batch approval.
+			var parallelIdx, patchIdx []int
+			for i, c := range classes {
+				if c == "parallel" {
+					parallelIdx = append(parallelIdx, i)
+				} else {
+					patchIdx = append(patchIdx, i)
+				}
+			}
+			if len(parallelIdx) > 0 {
+				runParallel(parallelIdx)
+			}
+			// Patches: batch approval if >1, else normal execution.
+			if len(patchIdx) > 1 {
+				fmt.Printf("\n\033[1;33mApply %d patches?\033[0m\n", len(patchIdx))
+				if ok, instr := a.tools.approver(fmt.Sprintf("Apply %d patches", len(patchIdx)), ""); ok {
+					a.tools.preApproved = true
+					runParallel(patchIdx)
+					a.tools.preApproved = false
+				} else if instr != "" {
+					pendingInstruction = instr
+					for _, i := range patchIdx {
+						results[i] = tcResult{tc: toolCalls[i], result: ToolResult{Content: "cancelled: user provided new instructions"}}
+					}
+				} else {
+					for _, i := range patchIdx {
+						results[i] = tcResult{tc: toolCalls[i], result: ToolResult{Content: "patch_file cancelled by user", IsError: true}}
+					}
+				}
+			} else if len(patchIdx) == 1 {
+				i := patchIdx[0]
+				results[i] = tcResult{tc: toolCalls[i], result: a.tools.Execute(ctx, toolCalls[i].Function.Name, toolCalls[i].Function.Arguments)}
+				if results[i].result.Instruction != "" {
+					pendingInstruction = results[i].result.Instruction
+				}
+			}
+
+		default:
+			// Contains serial tools — run everything serially.
 			for i, tc := range toolCalls {
 				results[i] = tcResult{tc: tc, result: a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)}
 				if results[i].result.Instruction != "" {
 					pendingInstruction = results[i].result.Instruction
-					// Cancel remaining tool calls so the message sequence stays valid.
 					for j := i + 1; j < len(toolCalls); j++ {
 						results[j] = tcResult{
 							tc:     toolCalls[j],
