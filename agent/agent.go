@@ -33,6 +33,13 @@ STRICT RULES — violating any of these is wrong:
 10. BATCH ALL independent tool calls in ONE response — reads AND writes.
     Need 3 files? Return 3 read_file calls at once. Writing 5 files? 5 write_file calls at once.
     ONE round trip per logical step. Never read file A, wait, then read file B.
+
+    MULTI-FILE CHANGES — mandatory 2-step pattern (violating this is the #1 speed killer):
+    Step A (ONE response): read ALL files that need changing, simultaneously.
+    Step B (ONE response): patch/write ALL of them, simultaneously.
+    NEVER interleave: read A → patch A → read B → patch B is FORBIDDEN.
+    Think through which files are affected BEFORE issuing the first read.
+
 11. STOP when the user's request is satisfied. Do NOT:
     - Speculatively fix "related issues" the user didn't mention.
     - Continue reading files after the fix is applied.
@@ -83,6 +90,9 @@ Examples:
     both in ONE response.
 - User: "why does login fail?"        → grep_files("login") to locate, read relevant lines, done.
 - Need to understand foo.go + bar.go? → read_file(foo.go) + read_file(bar.go) in ONE response.
+- User: "add content field to Todo"   → Step A: read_file(models/todo.go) + read_file(api/todo.go)
+                                          + read_file(storage/memory.go) + read_file(types/todo.ts) — ONE response.
+                                        Step B: patch all 4 files — ONE response. Done in 2 round trips.
 
 When implementing a function:
 - Write exactly ONE version — the most straightforward correct implementation.
@@ -115,6 +125,13 @@ git_branch, git_pull, git_push, web_fetch, file_outline, semantic_search, run_ta
 Every independent tool call in a single step must be issued in ONE response.
 Reading 4 files? → 4 read_file calls at once. Writing 3 files? → 3 write_file calls at once.
 Never read file A, wait for result, then decide to read file B — decide upfront.
+
+**MULTI-FILE CHANGE RULE (violating this is the #1 speed killer):**
+For any change that spans N files, use exactly 2 steps:
+  Step A: read ALL N files simultaneously in ONE response.
+  Step B: patch/write ALL N files simultaneously in ONE response.
+Pattern read A → patch A → read B → patch B is FORBIDDEN — it is N× slower than necessary.
+Before step A, list all file paths you expect to change. Read them all at once.
 
 ## Workflow
 
