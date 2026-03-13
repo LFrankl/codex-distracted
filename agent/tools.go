@@ -679,10 +679,14 @@ Two modes (pick one per call):
 1. String mode: provide old_str + new_str — finds the exact string and replaces it.
 2. Line mode: provide start_line + end_line + new_content — replaces that line range.
 
+MULTI-EDIT IN ONE CALL: Use the "patches" array to apply several string replacements to the
+same file in a single call. This is ALWAYS preferred over multiple patch_file calls on the same file.
+  Example: patches=[{"old_str":"a","new_str":"b"},{"old_str":"c","new_str":"d"}]
+  Patches are applied top-to-bottom; earlier ones must not shift the text needed by later ones.
+
 Tips:
 - old_str must match the file exactly (including indentation).
-- Use read_file first to see the exact content before patching.
-- For multiple independent edits in the same file, make separate patch_file calls.`,
+- Use read_file first to see the exact content before patching.`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -692,11 +696,23 @@ Tips:
 					},
 					"old_str": map[string]any{
 						"type":        "string",
-						"description": "[String mode] Exact substring to find and replace. Must be unique in the file.",
+						"description": "[Single string mode] Exact substring to find and replace.",
 					},
 					"new_str": map[string]any{
 						"type":        "string",
-						"description": "[String mode] Replacement text. Use empty string to delete old_str.",
+						"description": "[Single string mode] Replacement text. Use empty string to delete old_str.",
+					},
+					"patches": map[string]any{
+						"type":        "array",
+						"description": "[Multi-edit mode] Apply multiple string replacements in one call. Each item has old_str and new_str.",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"old_str": map[string]any{"type": "string"},
+								"new_str": map[string]any{"type": "string"},
+							},
+							"required": []string{"old_str", "new_str"},
+						},
 					},
 					"start_line": map[string]any{
 						"type":        "integer",
@@ -722,6 +738,10 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 		Path       string `json:"path"`
 		OldStr     string `json:"old_str"`
 		NewStr     string `json:"new_str"`
+		Patches    []struct {
+			OldStr string `json:"old_str"`
+			NewStr string `json:"new_str"`
+		} `json:"patches"`
 		StartLine  int    `json:"start_line"`
 		EndLine    int    `json:"end_line"`
 		NewContent string `json:"new_content"`
@@ -737,7 +757,53 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 	}
 	original := string(data)
 
-	// Decide mode
+	// Multi-edit mode: patches array takes priority
+	if len(args.Patches) > 0 {
+		fmt.Println()
+		current := original
+		for _, p := range args.Patches {
+			startLine := findLineNumber(current, p.OldStr)
+			PrintDiff(os.Stdout, args.Path, splitLines(p.OldStr), splitLines(p.NewStr), startLine, 3)
+		}
+		fmt.Println()
+
+		if ok, instr := r.approver("Apply patches", args.Path); !ok {
+			if instr != "" {
+				return ToolResult{Content: "patch cancelled — user provided new instruction", Instruction: instr}
+			}
+			return ToolResult{Content: "patch_file cancelled by user", IsError: true}
+		}
+
+		r.undo.Push(path)
+		for i, p := range args.Patches {
+			current, err = patchByString(current, p.OldStr, p.NewStr)
+			if err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					return ToolResult{
+						Content: fmt.Sprintf("patch %d/%d: %s\n\nCurrent content of %s:\n%s",
+							i+1, len(args.Patches), err.Error(), args.Path, current),
+						IsError: true,
+					}
+				}
+				return ToolResult{Content: fmt.Sprintf("patch %d/%d: %s", i+1, len(args.Patches), err.Error()), IsError: true}
+			}
+		}
+		if err := os.WriteFile(path, []byte(current), 0644); err != nil {
+			return ToolResult{Content: fmt.Sprintf("write error: %v", err), IsError: true}
+		}
+		oldLines := strings.Count(original, "\n") + 1
+		newLines := strings.Count(current, "\n") + 1
+		delta := newLines - oldLines
+		sign := "+"
+		if delta < 0 {
+			sign = ""
+		}
+		return ToolResult{
+			Content: fmt.Sprintf("Patched %s (%d edits, %d → %d lines, %s%d)", args.Path, len(args.Patches), oldLines, newLines, sign, delta),
+		}
+	}
+
+	// Decide single-edit mode
 	useLineMode := args.StartLine > 0 || args.EndLine > 0
 	useStrMode := args.OldStr != ""
 
@@ -745,7 +811,7 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 		return ToolResult{Content: "specify either old_str or start_line/end_line, not both", IsError: true}
 	}
 	if !useLineMode && !useStrMode {
-		return ToolResult{Content: "provide old_str (string mode) or start_line+end_line (line mode)", IsError: true}
+		return ToolResult{Content: "provide old_str (string mode), patches array (multi-edit), or start_line+end_line (line mode)", IsError: true}
 	}
 
 	// Show diff preview before applying

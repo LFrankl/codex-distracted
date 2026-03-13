@@ -40,6 +40,10 @@ STRICT RULES — violating any of these is wrong:
     NEVER interleave: read A → patch A → read B → patch B is FORBIDDEN.
     Think through which files are affected BEFORE issuing the first read.
 
+    SAME-FILE MULTI-EDIT: use patch_file's "patches" array instead of multiple patch_file calls.
+    patches=[{"old_str":"...","new_str":"..."},{"old_str":"...","new_str":"..."}]
+    Multiple calls on the same file = wasted round trips.
+
 11. STOP when the user's request is satisfied. Do NOT:
     - Speculatively fix "related issues" the user didn't mention.
     - Continue reading files after the fix is applied.
@@ -132,6 +136,9 @@ For any change that spans N files, use exactly 2 steps:
   Step B: patch/write ALL N files simultaneously in ONE response.
 Pattern read A → patch A → read B → patch B is FORBIDDEN — it is N× slower than necessary.
 Before step A, list all file paths you expect to change. Read them all at once.
+
+**SAME-FILE MULTI-EDIT:** Use patch_file's "patches" array to make multiple edits to one file
+in a single call. Never issue two patch_file calls for the same file — use patches=[...] instead.
 
 ## Workflow
 
