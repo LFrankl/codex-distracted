@@ -141,8 +141,14 @@ func (a *Agent) callLLM(ctx context.Context) (string, []llm.ToolCall, error) {
 	var finalToolCalls []llm.ToolCall
 	var turnUsage *llm.Usage
 
-	// Print assistant prefix
-	fmt.Fprint(a.out, "\n\033[1;36mAssistant:\033[0m ")
+	spinner := newSpinner(a.out)
+	spinner.Start("Thinking")
+	defer spinner.Stop() // ensure cleanup on early return
+
+	// prefixPrinted tracks whether we've emitted the "Assistant:" header.
+	// It is printed lazily on the first content token so the spinner line
+	// is fully cleared before any text appears.
+	prefixPrinted := false
 
 	err := a.client.Chat(ctx, a.messages, a.tools.Definitions(), func(event llm.StreamEvent) {
 		if event.Error != nil {
@@ -151,12 +157,18 @@ func (a *Agent) callLLM(ctx context.Context) (string, []llm.ToolCall, error) {
 		if event.Done {
 			finalToolCalls = event.ToolCalls
 			turnUsage = event.Usage
-			if len(event.ToolCalls) == 0 {
-				fmt.Fprintln(a.out) // newline after streamed content
+			spinner.Stop()
+			if contentBuilder.Len() > 0 {
+				fmt.Fprintln(a.out) // newline after streamed text
 			}
 			return
 		}
 		if event.Content != "" {
+			if !prefixPrinted {
+				spinner.Stop()
+				fmt.Fprint(a.out, "\n\033[1;36mAssistant:\033[0m ")
+				prefixPrinted = true
+			}
 			fmt.Fprint(a.out, event.Content)
 			contentBuilder.WriteString(event.Content)
 		}
