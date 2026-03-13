@@ -22,6 +22,7 @@ type ToolRegistry struct {
 	workDir  string
 	defs     []llm.Tool
 	approver Approver
+	undo     UndoStack
 }
 
 func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
@@ -180,6 +181,11 @@ func (r *ToolRegistry) writeFile(argsJSON string) ToolResult {
 	path := r.resolvePath(args.Path)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return ToolResult{Content: fmt.Sprintf("mkdir error: %v", err), IsError: true}
+	}
+
+	// Backup before overwrite (not needed for append since original is preserved)
+	if !args.Append {
+		r.undo.Push(path)
 	}
 
 	flag := os.O_CREATE | os.O_WRONLY
@@ -558,6 +564,9 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 	if !r.approver("Apply patch", args.Path) {
 		return ToolResult{Content: "patch_file cancelled by user", IsError: true}
 	}
+
+	// Backup original before applying patch
+	r.undo.Push(path)
 
 	var patched string
 

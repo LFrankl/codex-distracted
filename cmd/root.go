@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/chzyer/readline"
 	"github.com/spf13/cobra"
@@ -102,10 +103,10 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	}
 
 	// Interactive REPL mode
-	return runREPL(ag)
+	return runREPL(ag, provider.Name, model, workDir)
 }
 
-func runREPL(ag *agent.Agent) error {
+func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "\033[1;32mYou:\033[0m ",
 		HistoryFile:     config.ConfigDir() + "/.history",
@@ -117,7 +118,7 @@ func runREPL(ag *agent.Agent) error {
 	}
 	defer rl.Close()
 
-	fmt.Println("\033[1mCodex REPL\033[0m — type your request, 'exit' to quit, '/reset' to clear history")
+	fmt.Println("\033[1mCodex REPL\033[0m — type your request, '/help' for commands")
 
 	for {
 		line, err := rl.Readline()
@@ -131,16 +132,45 @@ func runREPL(ag *agent.Agent) error {
 			continue
 		}
 
-		switch line {
-		case "exit", "quit", "/quit":
+		switch {
+		case line == "exit" || line == "quit" || line == "/quit":
 			fmt.Println("Goodbye!")
 			return nil
-		case "/reset":
+
+		case line == "/reset":
 			ag.Reset()
 			fmt.Println("\033[2m[context cleared]\033[0m")
 			continue
-		case "/help":
+
+		case line == "/help":
 			printHelp()
+			continue
+
+		case line == "/undo":
+			msg, err := ag.Undo()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "\033[31m✗ %v\033[0m\n", err)
+			} else {
+				fmt.Printf("\033[32m✓ %s\033[0m  (%d undo steps left)\n", msg, ag.UndoLen())
+			}
+			continue
+
+		case line == "/sessions":
+			printSessions()
+			continue
+
+		case strings.HasPrefix(line, "/save"):
+			name := strings.TrimSpace(strings.TrimPrefix(line, "/save"))
+			saveSession(ag, provider, model, workDir, name)
+			continue
+
+		case strings.HasPrefix(line, "/load"):
+			id := strings.TrimSpace(strings.TrimPrefix(line, "/load"))
+			if id == "" {
+				fmt.Println("Usage: /load <session-id>")
+				continue
+			}
+			loadSession(ag, id)
 			continue
 		}
 
@@ -186,7 +216,62 @@ func interruptContext() (context.Context, context.CancelFunc) {
 
 func printHelp() {
 	fmt.Println(`Commands:
-  /reset   Clear conversation history
-  /help    Show this help
-  exit     Exit Codex`)
+  /reset            Clear conversation history
+  /undo             Revert last file write or patch
+  /save [name]      Save current session
+  /load <id>        Load a saved session
+  /sessions         List saved sessions
+  /help             Show this help
+  exit              Exit Codex`)
+}
+
+func saveSession(ag *agent.Agent, provider, model, workDir, name string) {
+	msgs := ag.Messages()
+	if len(msgs) == 0 {
+		fmt.Println("Nothing to save (no messages yet)")
+		return
+	}
+	id, err := agent.SaveSession(msgs, name, provider, model, workDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\033[31m✗ save failed: %v\033[0m\n", err)
+		return
+	}
+	stats := ag.Stats()
+	extra := ""
+	if stats.Total() > 0 {
+		extra = fmt.Sprintf(" | %s", stats.String())
+	}
+	fmt.Printf("\033[32m✓ Session saved: %s\033[0m  (%d messages%s)\n", id, len(msgs), extra)
+}
+
+func loadSession(ag *agent.Agent, id string) {
+	s, err := agent.LoadSession(id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\033[31m✗ %v\033[0m\n", err)
+		return
+	}
+	ag.SetMessages(s.Messages)
+	fmt.Printf("\033[32m✓ Loaded session %s\033[0m  (%d messages, saved %s)\n",
+		s.ID, len(s.Messages), s.CreatedAt.Format("2006-01-02 15:04"))
+}
+
+func printSessions() {
+	sessions, err := agent.ListSessions()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\033[31m✗ %v\033[0m\n", err)
+		return
+	}
+	if len(sessions) == 0 {
+		fmt.Println("No saved sessions. Use /save to save one.")
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tPROVIDER\tMODEL\tMSGS\tDATE")
+	fmt.Fprintln(w, "--\t--------\t-----\t----\t----")
+	for _, s := range sessions {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n",
+			s.ID, s.Provider, s.Model, len(s.Messages),
+			s.CreatedAt.Format("2006-01-02 15:04"))
+	}
+	w.Flush()
 }

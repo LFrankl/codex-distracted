@@ -32,6 +32,7 @@ type Agent struct {
 	messages []llm.Message
 	maxSteps int
 	out      io.Writer
+	stats    SessionStats
 }
 
 func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approver Approver) *Agent {
@@ -42,6 +43,21 @@ func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approv
 		out:      out,
 	}
 }
+
+// Messages returns the current conversation history.
+func (a *Agent) Messages() []llm.Message { return a.messages }
+
+// SetMessages replaces the conversation history (used when loading a session).
+func (a *Agent) SetMessages(msgs []llm.Message) { a.messages = msgs }
+
+// Stats returns accumulated token usage for this session.
+func (a *Agent) Stats() SessionStats { return a.stats }
+
+// Undo reverts the most recent file write or patch.
+func (a *Agent) Undo() (string, error) { return a.tools.undo.Pop() }
+
+// UndoLen returns how many undo steps are available.
+func (a *Agent) UndoLen() int { return a.tools.undo.Len() }
 
 // Reset clears conversation history (keeps system prompt)
 func (a *Agent) Reset() {
@@ -67,6 +83,11 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	for step := 0; step < a.maxSteps; step++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+
+		// Compress context if approaching token limit
+		if err := a.maybeCompress(ctx); err != nil {
+			fmt.Fprintf(a.out, "\033[2m[compression failed: %v]\033[0m\n", err)
 		}
 
 		response, toolCalls, err := a.callLLM(ctx)
@@ -111,6 +132,7 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 func (a *Agent) callLLM(ctx context.Context) (string, []llm.ToolCall, error) {
 	var contentBuilder strings.Builder
 	var finalToolCalls []llm.ToolCall
+	var turnUsage *llm.Usage
 
 	// Print assistant prefix
 	fmt.Fprint(a.out, "\n\033[1;36mAssistant:\033[0m ")
@@ -121,6 +143,7 @@ func (a *Agent) callLLM(ctx context.Context) (string, []llm.ToolCall, error) {
 		}
 		if event.Done {
 			finalToolCalls = event.ToolCalls
+			turnUsage = event.Usage
 			if len(event.ToolCalls) == 0 {
 				fmt.Fprintln(a.out) // newline after streamed content
 			}
@@ -134,6 +157,13 @@ func (a *Agent) callLLM(ctx context.Context) (string, []llm.ToolCall, error) {
 
 	if err != nil {
 		return "", nil, err
+	}
+
+	// Display token usage if provider reports it
+	if turnUsage != nil {
+		turn := TurnStats{turnUsage.PromptTokens, turnUsage.CompletionTokens}
+		a.stats.Add(turn)
+		fmt.Fprintf(a.out, "\033[2m  [%s | %s]\033[0m\n", turn.String(), a.stats.String())
 	}
 
 	return contentBuilder.String(), finalToolCalls, nil
@@ -188,7 +218,3 @@ func (a *Agent) printToolResult(name string, result ToolResult) {
 	fmt.Fprintf(a.out, "%s %s result:\n\033[2m%s\033[0m\n", icon, name, content)
 }
 
-// Messages returns current conversation history (for debugging)
-func (a *Agent) Messages() []llm.Message {
-	return a.messages
-}

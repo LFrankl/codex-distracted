@@ -113,6 +113,7 @@ func NewClient(baseURL, apiKey, model string) *Client {
 type StreamEvent struct {
 	Content   string     // text delta
 	ToolCalls []ToolCall // accumulated tool calls when done
+	Usage     *Usage     // token usage, present in the Done event (if provider reports it)
 	Done      bool
 	Error     error
 }
@@ -165,6 +166,7 @@ func (c *Client) parseStream(r io.Reader, onEvent func(StreamEvent)) error {
 
 	// Accumulate tool calls across chunks
 	toolCallMap := map[int]*ToolCall{}
+	var lastUsage *Usage
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -173,20 +175,24 @@ func (c *Client) parseStream(r io.Reader, onEvent func(StreamEvent)) error {
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
-			// Collect accumulated tool calls
 			var toolCalls []ToolCall
 			for i := 0; i < len(toolCallMap); i++ {
 				if tc, ok := toolCallMap[i]; ok {
 					toolCalls = append(toolCalls, *tc)
 				}
 			}
-			onEvent(StreamEvent{Done: true, ToolCalls: toolCalls})
+			onEvent(StreamEvent{Done: true, ToolCalls: toolCalls, Usage: lastUsage})
 			return nil
 		}
 
 		var chunk ChatResponse
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
+		}
+		// Some providers send usage in a separate chunk before [DONE]
+		if chunk.Usage.TotalTokens > 0 {
+			u := chunk.Usage
+			lastUsage = &u
 		}
 		if chunk.Error != nil {
 			return chunk.Error
