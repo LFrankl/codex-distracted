@@ -72,6 +72,15 @@ func LoadSession(id string) (*Session, error) {
 	return &s, nil
 }
 
+// DeleteSession removes a saved session by ID.
+func DeleteSession(id string) error {
+	path := sessionPath(id)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("session %q not found", id)
+	}
+	return os.Remove(path)
+}
+
 // ListSessions returns all saved sessions, newest first.
 func ListSessions() ([]Session, error) {
 	entries, err := os.ReadDir(sessionsDir())

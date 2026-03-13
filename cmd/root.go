@@ -36,6 +36,8 @@ var (
 	flagWorkDir     string
 	flagModel       string
 	flagAutoApprove bool
+	flagSession     string
+	flagSaveAs      string
 )
 
 func init() {
@@ -43,8 +45,10 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&flagWorkDir, "dir", "d", "", "Working directory (defaults to current dir)")
 	rootCmd.PersistentFlags().StringVarP(&flagModel, "model", "m", "", "Model to use (overrides provider default)")
 	rootCmd.PersistentFlags().BoolVarP(&flagAutoApprove, "auto-approve", "y", false, "Skip confirmation prompts for shell and patch actions")
+	rootCmd.PersistentFlags().StringVarP(&flagSession, "session", "s", "", "Resume a saved session by ID")
+	rootCmd.PersistentFlags().StringVar(&flagSaveAs, "save-as", "", "Auto-save session on exit with this name")
 
-	rootCmd.AddCommand(configCmd())
+	rootCmd.AddCommand(configCmd(), sessionCmd())
 }
 
 func Execute() {
@@ -87,6 +91,17 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	client := llm.NewClient(provider.BaseURL, provider.APIKey, model)
 	ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver)
 
+	// Resume a saved session if --session is set
+	if flagSession != "" {
+		s, err := agent.LoadSession(flagSession)
+		if err != nil {
+			return err
+		}
+		ag.SetMessages(s.Messages)
+		fmt.Printf("\033[32m✓\033[0m \033[2mResumed session %s  (%d messages)\033[0m\n",
+			s.ID, len(s.Messages))
+	}
+
 	autoMark := ""
 	if flagAutoApprove {
 		autoMark = "  \033[33m·  auto-approve\033[0m"
@@ -94,16 +109,26 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stdout, "\033[1mCodex\033[0m  \033[2m·  %s  ·  %s%s\033[0m\n",
 		model, workDir, autoMark)
 
-	// One-shot mode: prompt provided as arg
+	// One-shot mode
 	if len(args) > 0 {
 		prompt := strings.Join(args, " ")
 		ctx, cancel := interruptContext()
 		defer cancel()
-		return ag.Run(ctx, prompt)
+		if err := ag.Run(ctx, prompt); err != nil {
+			return err
+		}
+		if flagSaveAs != "" {
+			saveSession(ag, provider.Name, model, workDir, flagSaveAs)
+		}
+		return nil
 	}
 
 	// Interactive REPL mode
-	return runREPL(ag, provider.Name, model, workDir)
+	err = runREPL(ag, provider.Name, model, workDir)
+	if flagSaveAs != "" {
+		saveSession(ag, provider.Name, model, workDir, flagSaveAs)
+	}
+	return err
 }
 
 func runREPL(ag *agent.Agent, provider, model, workDir string) error {
@@ -123,7 +148,9 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 	for {
 		line, err := rl.Readline()
 		if err != nil { // EOF or interrupt
-			fmt.Println("\nGoodbye!")
+			fmt.Println()
+			promptSaveOnExit(ag, provider, model, workDir)
+			fmt.Println("Goodbye!")
 			return nil
 		}
 
@@ -134,6 +161,7 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 
 		switch {
 		case line == "exit" || line == "quit" || line == "/quit":
+			promptSaveOnExit(ag, provider, model, workDir)
 			fmt.Println("Goodbye!")
 			return nil
 
@@ -253,6 +281,32 @@ func loadSession(ag *agent.Agent, id string) {
 	ag.SetMessages(s.Messages)
 	fmt.Printf("\033[32m✓ Loaded session %s\033[0m  (%d messages, saved %s)\n",
 		s.ID, len(s.Messages), s.CreatedAt.Format("2006-01-02 15:04"))
+}
+
+func promptSaveOnExit(ag *agent.Agent, provider, model, workDir string) {
+	// Only prompt if there are user messages and --save-as wasn't used
+	if flagSaveAs != "" {
+		return
+	}
+	msgs := ag.Messages()
+	userCount := 0
+	for _, m := range msgs {
+		if m.Role == "user" {
+			userCount++
+		}
+	}
+	if userCount == 0 {
+		return
+	}
+	fmt.Printf("\033[2mSave session? [y/N] \033[0m")
+	var input string
+	fmt.Scanln(&input)
+	if strings.ToLower(strings.TrimSpace(input)) == "y" {
+		fmt.Print("\033[2mName (leave blank for timestamp): \033[0m")
+		var name string
+		fmt.Scanln(&name)
+		saveSession(ag, provider, model, workDir, name)
+	}
 }
 
 func printSessions() {
