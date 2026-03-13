@@ -15,9 +15,181 @@
 - **撤销栈** — 使用 `/undo` 撤销任意文件写入或修改
 - **项目记忆** — 在项目根目录放置 `.codex.md`，每次会话自动注入
 - **智能操作确认** — 只读命令（`ls`、`git status` 等）自动通过，写操作才需确认
-- **带框输入框** — 简洁的终端 UI，历史记录灰显，支持方向键导航
+- **带框输入框** — 简洁的终端 UI，历史记录灰显，支持方向键导航，支持多行粘贴
+- **审批重定向** — 确认危险操作时可选「Other instructions →」直接注入新指令，无需取消后重新输入
 
-## 安装
+## 在本地运行
+
+### 环境要求
+
+- **Go 1.21+**（`go version` 确认）
+- **支持 ANSI 颜色的终端**：macOS Terminal / iTerm2 / Windows Terminal / 任何现代 Linux 终端均可
+- **至少一个 AI 提供商的 API key**（见下方）
+
+> **Windows 用户**：推荐在 Windows Terminal 或 WSL 中运行，cmd.exe 对 ANSI 颜色支持不完整。
+
+---
+
+### 第一步：克隆并编译
+
+```bash
+git clone https://github.com/LFrankl/codex-distracted
+cd codex-distracted
+go build -o distracted-codex .
+```
+
+将二进制放到 PATH：
+
+```bash
+# macOS / Linux
+sudo mv distracted-codex /usr/local/bin/distracted-codex
+
+# 或者放到用户目录（不需要 sudo）
+mkdir -p ~/.local/bin
+mv distracted-codex ~/.local/bin/
+# 确保 ~/.local/bin 在 PATH 里：echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+验证安装：
+
+```bash
+distracted-codex --help
+```
+
+---
+
+### 第二步：获取 API Key
+
+选一个提供商即可开始使用。**推荐国内用户优先使用 DeepSeek**，性价比最高且延迟低。
+
+| 提供商 | 注册地址 | 国内访问 | 支持 Embedding |
+|--------|----------|----------|----------------|
+| DeepSeek | https://platform.deepseek.com | ✅ | ❌（不支持）|
+| 通义千问（Qwen） | https://dashscope.console.aliyun.com | ✅ | ✅ `text-embedding-v3` |
+| 智谱 GLM | https://open.bigmodel.cn | ✅ | ✅ `embedding-3` |
+| Moonshot | https://platform.moonshot.cn | ✅ | ❌ |
+| OpenAI | https://platform.openai.com | ⚠️ 需代理 | ✅ `text-embedding-3-small` |
+
+---
+
+### 第三步：配置 API Key
+
+```bash
+# 以 DeepSeek 为例
+distracted-codex config set-provider deepseek
+distracted-codex config set-key deepseek sk-xxxxxxxxxxxxxxxxxxxxxxxx
+
+# 验证配置
+distracted-codex config show
+```
+
+配置会保存到 `~/.codex/config.yaml`，之后无需重复配置。
+
+---
+
+### 第四步：第一次运行
+
+```bash
+# 进入你的项目目录（很重要！agent 以此目录为工作根目录）
+cd ~/my-project
+
+# 单次提问（非交互）
+distracted-codex "这个项目是做什么的？"
+
+# 交互式 REPL（推荐日常使用）
+distracted-codex
+```
+
+进入 REPL 后会看到：
+
+```
+Codex  ·  deepseek-chat  ·  /Users/you/my-project
+Type your request · /help for commands
+❯
+```
+
+---
+
+### 注意事项
+
+**工作目录**
+
+agent 的所有文件操作都基于启动时的当前目录。建议在项目根目录下启动，而不是在 `~` 或 `/`：
+
+```bash
+cd ~/my-project && distracted-codex
+```
+
+**API Key 安全**
+
+Key 明文存储在 `~/.codex/config.yaml`（权限 0600）。不要将此文件提交到 git。
+
+**DeepSeek 不支持 Embedding**
+
+如果你用 DeepSeek 并且想要代码语义搜索，需要额外配置一个支持 embedding 的提供商（如 Qwen）：
+
+```yaml
+# ~/.codex/config.yaml
+current_provider: deepseek   # 对话仍用 DeepSeek
+providers:
+  deepseek:
+    api_key: sk-xxx
+    model: deepseek-chat
+  qwen:
+    api_key: sk-xxx
+    embed_model: text-embedding-v3   # 只用于 /index，对话不用这个 provider
+```
+
+然后在对话中手动指定用 qwen 建索引：`distracted-codex --provider qwen /index`。或者直接用 BM25 本地搜索（无需任何 embedding，`/index` 默认会建）。
+
+**多行粘贴**
+
+终端支持 [Bracketed Paste Mode](https://en.wikipedia.org/wiki/Bracketed-paste) 时（绝大多数现代终端），可以直接粘贴多行文本（报错日志、代码片段）而不会提前提交。输入框会自动扩展高度。
+
+**`--auto-approve` 的风险**
+
+`-y` 会跳过所有确认（包括 `rm -rf`、`git push --force` 等）。只在完全信任 agent 输出时使用，建议先在交互模式下确认行为再切换。
+
+**自定义 OpenAI 兼容接口**
+
+任何支持 OpenAI API 格式的服务都可以用：
+
+```bash
+distracted-codex config set-provider myprovider
+distracted-codex config set-key myprovider my-api-key
+distracted-codex config set-model myprovider my-model-name
+# 然后手动编辑 ~/.codex/config.yaml，补上 base_url 字段
+```
+
+---
+
+### 推荐工作流
+
+```bash
+# 1. 进项目，建本地索引（一次性，之后自动加载）
+cd ~/my-project
+distracted-codex
+/index
+
+# 2. 日常使用
+distracted-codex          # REPL 模式，支持多轮对话
+distracted-codex "xxx"    # 单次执行，适合脚本
+
+# 3. 复杂任务用深度模式
+/thorough
+❯ 帮我重构 auth 模块，把 JWT 换成 session
+
+# 4. 保存重要会话
+/save auth-refactor
+
+# 5. 下次继续
+distracted-codex --session auth-refactor
+# 或者在 REPL 里 /load auth-refactor
+```
+
+---
+
+## 安装（快速）
 
 ```bash
 git clone https://github.com/LFrankl/codex-distracted
@@ -26,20 +198,20 @@ go build -o distracted-codex .
 sudo mv distracted-codex /usr/local/bin/
 ```
 
-需要 Go 1.21+。
+需要 Go 1.21+。详细说明见上方「在本地运行」。
 
 ## 快速开始
 
 ```bash
 # 配置提供商
-codex config set-provider deepseek
-codex config set-key deepseek sk-xxxxxxxxxxxxxxxx
+distracted-codex config set-provider deepseek
+distracted-codex config set-key deepseek sk-xxxxxxxxxxxxxxxx
 
 # 单次执行
-codex "用 Go 写一个二分查找函数"
+distracted-codex "用 Go 写一个二分查找函数"
 
 # 交互式 REPL
-codex
+distracted-codex
 ```
 
 ## 支持的提供商
