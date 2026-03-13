@@ -120,6 +120,29 @@
 
 ---
 
+## 2024-03 · 多文件修改串行太慢
+
+**问题**：agent 修改跨多个文件的功能（如给 Todo 加一个字段）时，逐个 read→patch→read→patch，N 个文件要 2N 次 LLM 往返，极慢。
+
+**根本原因（多重）**：
+1. LLM 每次 response 只输出一个 tool call，提示词没有明确的多文件批处理规范。
+2. `patch_file` 不支持对同一文件多处修改，导致同文件也要多次往返。
+3. Agent 执行层：只要有一个 serial 工具（如 `patch_file`），整个 response 里的所有工具全部串行，`read_file` 也跟着等。
+
+**解决方案**：
+1. **提示词**：两处 prompt 加入「多文件变更强制两步模式」——第一步一次性读所有文件，第二步一次性 patch 所有文件，禁止 read A→patch A→read B→patch B 模式。加了具体示例（4 文件 add field 场景）。同文件多处修改必须用 `patches[]` 数组。
+2. **`patch_file` 新增 `patches` 数组参数**：一次调用对同一文件做多处字符串替换，所有 diff 一起展示，一次审批，一次写入。
+3. **Agent 执行层三级分类**：
+   - `parallel`（read_file/write_file/find_files 等）→ 始终并发
+   - `patchOnly`（patch_file）→ 展示所有 diff，一次审批，并发写入
+   - `serial`（shell_exec/git 操作/move/delete）→ 保持串行逐个审批
+
+   混合 response（reads + patches）：reads 先并发，再批量审批 patches 并发执行。
+
+**效果**：4 文件 add-field 任务从 ~10 次往返降至 ~2 次往返（全部读 → 全部 patch）。
+
+---
+
 ## 2024-03 · 命令审批只有 Yes/No，无法重定向 agent
 
 **问题**：执行危险命令（shell_exec、patch_file、git_commit 等）时弹出确认框只有「是/否」，用户想改变 agent 方向只能取消再重新输入一条消息，体验割裂。
