@@ -67,11 +67,11 @@ type SubAgentResult struct {
 // All output is discarded; results are extracted from the message history afterward.
 func runSubAgent(ctx context.Context, task, parentCtx string, client *llm.Client, workDir string) SubAgentResult {
 	ag := &Agent{
-		client:   client,
-		tools:    NewToolRegistry(workDir, AutoApprover(), client, 1),
-		maxSteps: maxSubAgentSteps,
-		out:      io.Discard,
-		prompt:   subAgentPrompt,
+		client:       client,
+		tools:        NewToolRegistry(workDir, AutoApprover(), client, 1),
+		maxSteps:     maxSubAgentSteps,
+		out:          io.Discard,
+		customPrompt: subAgentPrompt,
 	}
 
 	fullTask := task
