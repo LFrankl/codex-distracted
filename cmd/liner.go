@@ -28,16 +28,19 @@ type liner struct {
 	boxDrawn    bool // whether the 3-line box is currently on screen
 
 	// Tab completion
-	completions  []string
-	tabState     int    // cycles through matches on successive Tabs
-	tabPrefix    string // prefix at last Tab press
-	tabMatches   []string
+	completions []string
+	tabState    int    // cycles through matches on successive Tabs
+	tabPrefix   string // prefix at last Tab press
+	tabMatches  []string
 
 	// Ctrl+R reverse history search
-	searching    bool
-	searchQuery  string
-	searchMatch  int // index into history of current match (-1 = none)
-	searchSaved  []rune // original buffer before search
+	searching   bool
+	searchQuery string
+	searchMatch int    // index into history of current match (-1 = none)
+	searchSaved []rune // original buffer before search
+
+	// Bracketed paste mode
+	inPaste bool // true while receiving bracketed paste content
 }
 
 func newLiner(historyFile string) *liner {
@@ -116,12 +119,17 @@ func (l *liner) Readline() (string, error) {
 	}
 	defer term.Restore(fd, oldState)
 
+	// Enable bracketed paste mode so pasted newlines don't trigger Enter.
+	fmt.Print("\033[?2004h")
+	defer fmt.Print("\033[?2004l")
+
 	l.buf = l.buf[:0]
 	l.cursor = 0
 	l.histPos = -1
 	l.boxDrawn = false
 	l.tabState = -1
 	l.searching = false
+	l.inPaste = false
 	l.redraw()
 
 	for {
@@ -143,7 +151,26 @@ func (l *liner) Readline() (string, error) {
 		}
 
 		switch r {
-		case '\r', '\n': // Enter
+		case runeStartPaste:
+			l.inPaste = true
+
+		case runeEndPaste:
+			l.inPaste = false
+			l.redraw()
+
+		case '\r', '\n':
+			if l.inPaste {
+				// Inside a bracketed paste: insert a literal newline into the buffer.
+				newBuf := make([]rune, len(l.buf)+1)
+				copy(newBuf, l.buf[:l.cursor])
+				newBuf[l.cursor] = '\n'
+				copy(newBuf[l.cursor+1:], l.buf[l.cursor:])
+				l.buf = newBuf
+				l.cursor++
+				l.redraw()
+				continue
+			}
+			// Normal Enter: submit.
 			if l.searching {
 				l.exitSearch(true)
 			}
@@ -433,19 +460,21 @@ func (l *liner) exitSearch(keep bool) {
 
 // Sentinel runes for escape sequences
 const (
-	runeUp        = rune(0x100001)
-	runeDown      = rune(0x100002)
-	runeLeft      = rune(0x100003)
-	runeRight     = rune(0x100004)
-	runeDelete    = rune(0x100005)
-	runeWordLeft  = rune(0x100006)
-	runeWordRight = rune(0x100007)
-	runeHome      = rune(0x100008)
-	runeEnd       = rune(0x100009)
-	runeCtrlR     = rune(0x10000A)
-	runeEsc       = rune(0x10000B)
-	runTab        = rune(0x100009 + 3) // 0x10000C
-	runeBackspace = rune(0x10000D)
+	runeUp         = rune(0x100001)
+	runeDown       = rune(0x100002)
+	runeLeft       = rune(0x100003)
+	runeRight      = rune(0x100004)
+	runeDelete     = rune(0x100005)
+	runeWordLeft   = rune(0x100006)
+	runeWordRight  = rune(0x100007)
+	runeHome       = rune(0x100008)
+	runeEnd        = rune(0x100009)
+	runeCtrlR      = rune(0x10000A)
+	runeEsc        = rune(0x10000B)
+	runTab         = rune(0x10000C)
+	runeBackspace  = rune(0x10000D)
+	runeStartPaste = rune(0x10000E) // ESC[200~ bracketed paste start
+	runeEndPaste   = rune(0x10000F) // ESC[201~ bracketed paste end
 )
 
 // readNext reads one logical input event (rune or escape sequence) from stdin.
@@ -548,6 +577,10 @@ func (l *liner) readNext() (rune, error) {
 					return runeWordRight, nil // Ctrl+Right on some terms
 				case "6":
 					return runeWordLeft, nil  // Ctrl+Left on some terms
+				case "200":
+					return runeStartPaste, nil
+				case "201":
+					return runeEndPaste, nil
 				}
 			}
 			return 0, nil
@@ -582,12 +615,25 @@ func (l *liner) statusLine() string {
 	return "\033[2m↑↓ history  Ctrl+R search  Tab complete\033[0m"
 }
 
+// displayRunes converts buf runes to a display string, replacing \n with a dim ↵ marker.
+func displayRunes(runes []rune) string {
+	var sb strings.Builder
+	for _, r := range runes {
+		if r == '\n' {
+			sb.WriteString("\033[2m↵\033[0m")
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
 // redraw repaints the 3-line input box in-place.
 func (l *liner) redraw() {
 	w := termWidth()
 
-	line := string(l.buf)
-	beforeCursor := string(l.buf[:l.cursor])
+	line := displayRunes(l.buf)
+	beforeCursor := displayRunes(l.buf[:l.cursor])
 	promptW := visWidth(l.prompt)
 	cursorCol := promptW + visWidth(beforeCursor)
 
@@ -719,7 +765,8 @@ func (l *liner) loadHistory() {
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if line != "" {
-			l.history = append(l.history, line)
+			// Unescape \001 back to newline (multi-line entries).
+			l.history = append(l.history, strings.ReplaceAll(line, "\x01", "\n"))
 		}
 	}
 }
@@ -729,8 +776,13 @@ func (l *liner) saveHistory() {
 		return
 	}
 	_ = os.MkdirAll(filepath.Dir(l.historyFile), 0700)
+	lines := make([]string, len(l.history))
+	for i, h := range l.history {
+		// Escape literal newlines so the history file stays line-delimited.
+		lines[i] = strings.ReplaceAll(h, "\n", "\x01")
+	}
 	_ = os.WriteFile(l.historyFile,
-		[]byte(strings.Join(l.history, "\n")+"\n"), 0600)
+		[]byte(strings.Join(lines, "\n")+"\n"), 0600)
 }
 
 func defaultHistoryFile() string {
