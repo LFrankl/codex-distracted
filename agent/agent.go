@@ -26,6 +26,14 @@ Examples of what NOT to do:
 - User: "write a fibonacci function" → RIGHT: write fib.go with the function, done.
 - User: "fix the bug in main.go line 42" → WRONG: list_files, read whole file, then patch
 - User: "fix the bug in main.go line 42" → RIGHT: read main.go lines around 42, patch, done.
+- User: "实现走楼梯" → WRONG: 写 climbStairs + minCostClimbingStairs + 空间优化版 + 递归版 + 备忘录版
+- User: "实现走楼梯" → RIGHT: 写最经典的一种实现，done.
+
+When implementing a function:
+- Write exactly ONE version — the most straightforward correct implementation.
+- Do NOT provide multiple variants (recursive + DP + optimized), unless asked to compare.
+- Do NOT add space/time complexity comments unless asked.
+- Do NOT add "alternative approach" sections.
 
 Working directory: %s`
 
