@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -116,10 +115,12 @@ func sessionDeleteCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 			if !force {
-				fmt.Printf("Delete session %q? [y/N] ", id)
-				var input string
-				fmt.Scanln(&input)
-				if strings.ToLower(strings.TrimSpace(input)) != "y" {
+				idx := agent.Prompt(
+					fmt.Sprintf("Delete session %q?", id),
+					[]agent.Choice{{"Yes, delete"}, {"No, cancel"}},
+					1,
+				)
+				if idx != 0 {
 					fmt.Println("Cancelled.")
 					return nil
 				}

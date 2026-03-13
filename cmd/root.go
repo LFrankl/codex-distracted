@@ -319,7 +319,6 @@ func loadSession(ag *agent.Agent, id string) {
 }
 
 func promptSaveOnExit(ag *agent.Agent, provider, model, workDir string) {
-	// Only prompt if there are user messages and --save-as wasn't used
 	if flagSaveAs != "" {
 		return
 	}
@@ -333,15 +332,20 @@ func promptSaveOnExit(ag *agent.Agent, provider, model, workDir string) {
 	if userCount == 0 {
 		return
 	}
-	fmt.Printf("\033[2mSave session? [y/N] \033[0m")
-	var input string
-	fmt.Scanln(&input)
-	if strings.ToLower(strings.TrimSpace(input)) == "y" {
-		fmt.Print("\033[2mName (leave blank for timestamp): \033[0m")
-		var name string
-		fmt.Scanln(&name)
-		saveSession(ag, provider, model, workDir, name)
+
+	idx := agent.Prompt("Save this session?", []agent.Choice{
+		{"Yes — enter a name"},
+		{"No"},
+	}, 1)
+
+	if idx != 0 {
+		return
 	}
+
+	fmt.Printf("\033[2mSession name (blank = timestamp): \033[0m")
+	var name string
+	fmt.Scanln(&name)
+	saveSession(ag, provider, model, workDir, strings.TrimSpace(name))
 }
 
 func printSessions() {
