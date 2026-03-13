@@ -166,7 +166,7 @@ func (a *Agent) callLLM(ctx context.Context) (string, []llm.ToolCall, error) {
 		if event.Content != "" {
 			if !prefixPrinted {
 				spinner.Stop()
-				fmt.Fprint(a.out, "\n\033[1;36mAssistant:\033[0m ")
+				fmt.Fprint(a.out, "\n\033[36m◈\033[0m ")
 				prefixPrinted = true
 			}
 			fmt.Fprint(a.out, event.Content)
@@ -182,58 +182,97 @@ func (a *Agent) callLLM(ctx context.Context) (string, []llm.ToolCall, error) {
 	if turnUsage != nil {
 		turn := TurnStats{turnUsage.PromptTokens, turnUsage.CompletionTokens}
 		a.stats.Add(turn)
-		fmt.Fprintf(a.out, "\033[2m  [%s | %s]\033[0m\n", turn.String(), a.stats.String())
+		fmt.Fprintf(a.out, "  \033[2m↑%d ↓%d", turn.PromptTokens, turn.CompletionTokens)
+		if a.stats.Turns > 1 {
+			fmt.Fprintf(a.out, "  ·  total ↑%d ↓%d", a.stats.PromptTokens, a.stats.CompletionTokens)
+		}
+		fmt.Fprint(a.out, "\033[0m\n")
 	}
 
 	return contentBuilder.String(), finalToolCalls, nil
 }
 
 func (a *Agent) printToolCall(tc llm.ToolCall) {
-	fmt.Fprintf(a.out, "\n\033[1;33m▶ Tool:\033[0m %s", tc.Function.Name)
-
-	// Pretty print args
-	var args map[string]any
-	if json.Unmarshal([]byte(tc.Function.Arguments), &args) == nil {
-		// Show key args inline
-		switch tc.Function.Name {
-		case "read_file", "write_file":
-			if path, ok := args["path"]; ok {
-				fmt.Fprintf(a.out, "(%v)", path)
-			}
-		case "shell_exec":
-			if cmd, ok := args["command"]; ok {
-				fmt.Fprintf(a.out, "(%v)", cmd)
-			}
-		case "grep_files":
-			if p, ok := args["pattern"]; ok {
-				fmt.Fprintf(a.out, "(%v)", p)
-			}
-		case "list_files":
-			if p, ok := args["path"]; ok {
-				fmt.Fprintf(a.out, "(%v)", p)
-			}
-		}
+	detail := toolDetail(tc)
+	if detail != "" {
+		fmt.Fprintf(a.out, "\n  \033[33m◆\033[0m \033[1m%s\033[0m  \033[2m%s\033[0m\n",
+			tc.Function.Name, detail)
+	} else {
+		fmt.Fprintf(a.out, "\n  \033[33m◆\033[0m \033[1m%s\033[0m\n", tc.Function.Name)
 	}
-	fmt.Fprintln(a.out)
 }
 
-func (a *Agent) printToolResult(name string, result ToolResult) {
-	icon := "\033[1;32m✓\033[0m"
-	if result.IsError {
-		icon = "\033[1;31m✗\033[0m"
+func toolDetail(tc llm.ToolCall) string {
+	var args map[string]any
+	if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
+		return ""
 	}
-
-	// Truncate long outputs for display
-	content := result.Content
-	const maxDisplay = 800
-	if len(content) > maxDisplay {
-		lines := strings.Split(content, "\n")
-		if len(lines) > 20 {
-			content = strings.Join(lines[:20], "\n") +
-				fmt.Sprintf("\n... (%d more lines)", len(lines)-20)
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := args[k]; ok {
+				s := fmt.Sprintf("%v", v)
+				if s != "" && s != "<nil>" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	switch tc.Function.Name {
+	case "read_file", "write_file", "patch_file":
+		return pick("path")
+	case "shell_exec":
+		return pick("command")
+	case "grep_files":
+		return pick("pattern")
+	case "list_files":
+		return pick("path")
+	case "git_commit":
+		return pick("message")
+	case "git_diff":
+		if staged, ok := args["staged"].(bool); ok && staged {
+			return "staged"
+		}
+		return pick("base")
+	case "git_log":
+		if n, ok := args["n"].(float64); ok && int(n) != 10 {
+			return fmt.Sprintf("-%d", int(n))
 		}
 	}
+	return ""
+}
 
-	fmt.Fprintf(a.out, "%s %s result:\n\033[2m%s\033[0m\n", icon, name, content)
+func (a *Agent) printToolResult(_ string, result ToolResult) {
+	content := strings.TrimRight(result.Content, "\n")
+	lines := strings.Split(content, "\n")
+
+	const maxLines = 15
+	truncated := 0
+	if len(lines) > maxLines {
+		truncated = len(lines) - maxLines
+		lines = lines[:maxLines]
+	}
+
+	if result.IsError {
+		fmt.Fprintf(a.out, "  \033[31m✗\033[0m \033[2m%s\033[0m\n", lines[0])
+		for _, l := range lines[1:] {
+			fmt.Fprintf(a.out, "    \033[2m%s\033[0m\n", l)
+		}
+		return
+	}
+
+	if len(lines) <= 1 {
+		// Single line: show inline
+		fmt.Fprintf(a.out, "  \033[32m✓\033[0m \033[2m%s\033[0m\n", lines[0])
+	} else {
+		// Multi-line: gutter
+		fmt.Fprintf(a.out, "  \033[32m✓\033[0m\n")
+		for _, l := range lines {
+			fmt.Fprintf(a.out, "  \033[2m│ %s\033[0m\n", l)
+		}
+		if truncated > 0 {
+			fmt.Fprintf(a.out, "  \033[2m│ … (%d more lines)\033[0m\n", truncated)
+		}
+	}
 }
 

@@ -87,12 +87,12 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	client := llm.NewClient(provider.BaseURL, provider.APIKey, model)
 	ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver)
 
-	approveNote := "interactive"
+	autoMark := ""
 	if flagAutoApprove {
-		approveNote = "auto-approve"
+		autoMark = "  \033[33m·  auto-approve\033[0m"
 	}
-	fmt.Fprintf(os.Stdout, "\033[2m[Codex] Provider: %s | Model: %s | Dir: %s | Approve: %s\033[0m\n",
-		provider.Name, model, workDir, approveNote)
+	fmt.Fprintf(os.Stdout, "\033[1mCodex\033[0m  \033[2m·  %s  ·  %s%s\033[0m\n",
+		model, workDir, autoMark)
 
 	// One-shot mode: prompt provided as arg
 	if len(args) > 0 {
@@ -118,7 +118,7 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 	}
 	defer rl.Close()
 
-	fmt.Println("\033[1mCodex REPL\033[0m — type your request, '/help' for commands")
+	fmt.Println("\033[2mType your request · /help for commands\033[0m")
 
 	for {
 		line, err := rl.Readline()
