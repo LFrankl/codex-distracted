@@ -17,8 +17,9 @@ import (
 
 // ToolResult holds the output of a tool call
 type ToolResult struct {
-	Content string
-	IsError bool
+	Content     string
+	IsError     bool
+	Instruction string // non-empty when user chose "Other instructions" at approval prompt
 }
 
 // ToolRegistry maps tool names to their definitions and handlers
@@ -522,8 +523,13 @@ func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 
 	// Auto-approve safe read-only commands; prompt only for mutating ones.
 	fmt.Printf("\n\033[2m  $ %s\033[0m\n", args.Command)
-	if !isSafeReadOnly(args.Command) && !r.approver("Execute shell command", args.Command) {
-		return ToolResult{Content: "shell_exec cancelled by user", IsError: true}
+	if !isSafeReadOnly(args.Command) {
+		if ok, instr := r.approver("Execute shell command", args.Command); !ok {
+			if instr != "" {
+				return ToolResult{Content: "shell_exec cancelled — user provided new instruction", Instruction: instr}
+			}
+			return ToolResult{Content: "shell_exec cancelled by user", IsError: true}
+		}
 	}
 
 	workDir := r.workDir
@@ -757,7 +763,10 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 	}
 	fmt.Println()
 
-	if !r.approver("Apply patch", args.Path) {
+	if ok, instr := r.approver("Apply patch", args.Path); !ok {
+		if instr != "" {
+			return ToolResult{Content: "patch cancelled — user provided new instruction", Instruction: instr}
+		}
 		return ToolResult{Content: "patch_file cancelled by user", IsError: true}
 	}
 

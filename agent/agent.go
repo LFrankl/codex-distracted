@@ -375,6 +375,8 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 			fmt.Fprintf(a.out, "\n  \033[2m⟳ delegating to sub-agent\033[0m\n")
 		}
 
+		var pendingInstruction string
+
 		if !anySerial && len(toolCalls) > 1 {
 			// All calls are safe to parallelize (write_file, read_file, find_files, etc.)
 			type indexedResult struct {
@@ -395,6 +397,17 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 		} else {
 			for i, tc := range toolCalls {
 				results[i] = tcResult{tc: tc, result: a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)}
+				if results[i].result.Instruction != "" {
+					pendingInstruction = results[i].result.Instruction
+					// Cancel remaining tool calls so the message sequence stays valid.
+					for j := i + 1; j < len(toolCalls); j++ {
+						results[j] = tcResult{
+							tc:     toolCalls[j],
+							result: ToolResult{Content: "cancelled: user provided new instructions"},
+						}
+					}
+					break
+				}
 			}
 		}
 
@@ -419,6 +432,15 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 				Name:       r.tc.Function.Name,
 				Content:    r.content,
 			})
+		}
+
+		// If the user redirected via "Other instructions", inject as a new user turn.
+		if pendingInstruction != "" {
+			a.messages = append(a.messages, llm.Message{
+				Role:    "user",
+				Content: pendingInstruction,
+			})
+			continue
 		}
 	}
 

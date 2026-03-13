@@ -119,3 +119,16 @@
 **解决方案**：去掉 `embed_model` 配置，使用 BM25 本地搜索（零 API 依赖）。向量搜索可通过配置 Qwen（`text-embedding-v3`）或 OpenAI（`text-embedding-3-small`）实现。
 
 ---
+
+## 2024-03 · 命令审批只有 Yes/No，无法重定向 agent
+
+**问题**：执行危险命令（shell_exec、patch_file、git_commit 等）时弹出确认框只有「是/否」，用户想改变 agent 方向只能取消再重新输入一条消息，体验割裂。
+
+**根本原因**：`Approver` 类型原为 `func(kind, detail string) bool`，只能表达「批准/拒绝」，无法携带用户的新指令文本。
+
+**解决方案**：
+1. `Approver` 签名改为 `func(kind, detail string) (proceed bool, instruction string)`，`AutoApprover` 返回 `(true, "")`, `InteractiveApprover` 新增第 3 选项「Other instructions →」，选后读取一行文本作为新指令。
+2. `ToolResult` 新增 `Instruction string` 字段；`shellExec`、`patchFile`、`gitCommit`、`gitPull`、`gitPush` 的审批路径在 `instruction != ""` 时返回 `ToolResult{Instruction: instr}`。
+3. Agent 循环串行执行工具时，一旦某个结果的 `Instruction != ""`，立即将后续未执行的工具标记为 `cancelled`，所有工具结果写入消息历史后，追加一条 `role: user` 消息（内容为 instruction），然后 `continue` 进入下一步，让 LLM 基于新指令继续工作。
+
+---

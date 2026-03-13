@@ -218,9 +218,11 @@ func (r *ToolRegistry) gitCommit(argsJSON string) ToolResult {
 
 	fmt.Printf("\n\033[2m%s\033[0m\n\033[1;33mMessage:\033[0m %s\n", staged, args.Message)
 
-	if !r.approver("git commit", args.Message) {
-		// Unstage everything
+	if ok, instr := r.approver("git commit", args.Message); !ok {
 		r.gitRun("reset", "HEAD")
+		if instr != "" {
+			return ToolResult{Instruction: instr}
+		}
 		return ToolResult{Content: "git_commit cancelled by user (changes unstaged)", IsError: true}
 	}
 
@@ -392,7 +394,10 @@ func (r *ToolRegistry) gitPull(argsJSON string) ToolResult {
 		args.Remote = "origin"
 	}
 
-	if !r.approver("git pull", fmt.Sprintf("%s %s", args.Remote, args.Branch)) {
+	if ok, instr := r.approver("git pull", fmt.Sprintf("%s %s", args.Remote, args.Branch)); !ok {
+		if instr != "" {
+			return ToolResult{Instruction: instr}
+		}
 		return ToolResult{Content: "git_pull cancelled by user", IsError: true}
 	}
 
@@ -430,7 +435,10 @@ func (r *ToolRegistry) gitPush(argsJSON string) ToolResult {
 	if args.Force {
 		desc += " (FORCE)"
 	}
-	if !r.approver("git push", desc) {
+	if ok, instr := r.approver("git push", desc); !ok {
+		if instr != "" {
+			return ToolResult{Instruction: instr}
+		}
 		return ToolResult{Content: "git_push cancelled by user", IsError: true}
 	}
 
