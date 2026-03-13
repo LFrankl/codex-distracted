@@ -462,6 +462,37 @@ func isSafeReadOnly(command string) bool {
 	return true
 }
 
+// isMkdirOnly returns true if the command is exclusively creating directories
+// (e.g. "mkdir foo", "mkdir -p a/b/c", "mkdir -p a && mkdir -p b").
+// Used to silently skip redundant mkdir calls in sub-agents.
+func isMkdirOnly(command string) bool {
+	cmd := strings.TrimSpace(command)
+	if cmd == "" {
+		return false
+	}
+	// Split on && or ; and check each segment is just mkdir
+	segments := strings.FieldsFunc(cmd, func(r rune) bool { return r == ';' })
+	var parts []string
+	for _, seg := range segments {
+		for _, p := range strings.Split(seg, "&&") {
+			parts = append(parts, strings.TrimSpace(p))
+		}
+	}
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		tokens := strings.Fields(part)
+		if len(tokens) == 0 {
+			continue
+		}
+		if filepath.Base(tokens[0]) != "mkdir" {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 	var args struct {
 		Command        string `json:"command"`
@@ -474,6 +505,12 @@ func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 
 	if args.TimeoutSeconds <= 0 || args.TimeoutSeconds > 120 {
 		args.TimeoutSeconds = 30
+	}
+
+	// In sub-agents (depth > 0), silently skip pure mkdir commands — write_file
+	// already creates parent directories automatically, so mkdir is always redundant.
+	if r.depth > 0 && isMkdirOnly(args.Command) {
+		return ToolResult{Content: "(skipped: write_file creates directories automatically)"}
 	}
 
 	// Auto-approve safe read-only commands; prompt only for mutating ones.

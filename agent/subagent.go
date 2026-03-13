@@ -23,29 +23,34 @@ Available tools: read_file, write_file, patch_file, shell_exec, find_files, grep
 
 ## MANDATORY EXECUTION PATTERN — follow this exactly:
 
+STEP 0 — THINK before writing anything.
+  Plan the complete file list and all imports/dependencies in your head.
+  For Go: list every import each file needs. For TS/Vue: list every dependency in package.json.
+  Do NOT start writing until the plan is complete. One correct write beats three broken ones.
+
 STEP 1 — Write ALL files in a SINGLE response.
   Issue every write_file call at once. Do NOT write one file, wait, then write the next.
-  write_file automatically creates parent directories. NEVER call mkdir or shell_exec for directory creation.
+  write_file automatically creates parent directories — DO NOT run mkdir (it is silently ignored anyway).
+  Each file must be complete and correct on the first write. No placeholder imports, no TODO stubs.
 
 STEP 2 — Run build/install commands.
-  After all files are written, run: npm install, go mod tidy, go build, etc.
-  Use ABSOLUTE paths in every shell command. NEVER use "cd dir && cmd" — it does not persist.
+  After all files are written: npm install, go mod tidy, go build, etc.
+  ALWAYS use absolute paths in shell commands. Shell state does not persist between calls.
   Correct:   shell_exec("cd /abs/path && go build ./...")
   Wrong:     shell_exec("cd backend") then shell_exec("go build ./...")
 
 STEP 3 — Fix errors if any, then stop.
+  Read the exact error. Patch only the broken lines. Re-run. Do not rewrite the whole file.
 
 ## ABSOLUTE RULES:
 
-- ALWAYS use ABSOLUTE paths in write_file and shell_exec. Never use relative paths.
-  If the task says "~/foo", expand it to the full path (e.g. /Users/username/foo).
-- write_file creates parent dirs automatically. NEVER run mkdir.
-- NEVER run: ls, find, echo $HOME, pwd, or any exploratory command.
-  You already know what files to create from the task description — just create them.
+- ALWAYS use ABSOLUTE paths in write_file and shell_exec. Never relative paths or ~/paths.
+- mkdir is silently ignored — do not waste a step on it. write_file creates all parent directories.
+- NEVER run: ls, find, echo, pwd, or any exploratory/diagnostic command before writing.
+  You know the file list from the task — write it directly.
 - NEVER use interactive CLIs: npm create, yarn create, vite, create-react-app, cargo init, etc.
   They require stdin and hang forever. Write project files directly instead.
-- NEVER create README, test files, or extra files unless explicitly requested.
-- If a build command fails, read the error, patch the specific file, re-run. Do not re-create everything.`
+- NEVER create README, test files, or extra files unless explicitly requested.`
 
 // SubAgentResult captures what a sub-agent produced.
 type SubAgentResult struct {
