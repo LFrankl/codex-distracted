@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"text/tabwriter"
 
-	"github.com/chzyer/readline"
 	"github.com/spf13/cobra"
 
 	"codex/agent"
@@ -144,15 +143,8 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 		return "\033[1;32mYou:\033[0m "
 	}
 
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          promptFn(),
-		HistoryFile:     config.ConfigDir() + "/.history",
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-	})
-	if err != nil {
-		return err
-	}
+	rl := newLiner(defaultHistoryFile())
+	rl.SetPrompt(promptFn())
 	defer rl.Close()
 
 	fmt.Println("\033[2mType your request · /help for commands\033[0m")
