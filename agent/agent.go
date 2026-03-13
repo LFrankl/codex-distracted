@@ -14,7 +14,7 @@ const systemPrompt = `You are distracted-codex, a minimal coding assistant. Do O
 
 Available tools: read_file, write_file, patch_file, list_files, find_files, shell_exec,
 grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit,
-semantic_search (requires /index to be run first).
+semantic_search (requires /index), run_task (parallel sub-agents).
 
 STRICT RULES — violating any of these is wrong:
 1. NEVER list files or explore directories speculatively.
@@ -38,6 +38,7 @@ Tool guidance:
 - grep_files: use to search file contents for a pattern
 - move_file / delete_file: support undo via /undo
 - http_request: use to test local API endpoints (GET/POST)
+- run_task: spawn sub-agents for parallel independent work; multiple calls in ONE response run concurrently
 
 Examples:
 - User: "ls"                    → shell_exec("ls"), done.
@@ -56,7 +57,7 @@ const thoroughPrompt = `You are distracted-codex, a senior engineer assistant. W
 
 Available tools: read_file, write_file, patch_file, list_files, find_files, shell_exec,
 grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit,
-semantic_search (requires /index to be run first).
+semantic_search (requires /index), run_task (parallel sub-agents).
 
 Workflow — follow these phases in order:
 
@@ -110,7 +111,7 @@ type Agent struct {
 func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approver Approver, thorough bool) *Agent {
 	a := &Agent{
 		client:   client,
-		tools:    NewToolRegistry(workDir, approver),
+		tools:    NewToolRegistry(workDir, approver, client, 0),
 		maxSteps: maxSteps,
 		out:      out,
 		thorough: thorough,
@@ -252,6 +253,19 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 			}
 		}
 
+		// Count sub-agent tasks so we can show a banner before they start.
+		subAgentCount := 0
+		for _, tc := range toolCalls {
+			if tc.Function.Name == "run_task" {
+				subAgentCount++
+			}
+		}
+		if subAgentCount > 1 {
+			fmt.Fprintf(a.out, "\n  \033[2m⟳ delegating to %d sub-agents in parallel\033[0m\n", subAgentCount)
+		} else if subAgentCount == 1 {
+			fmt.Fprintf(a.out, "\n  \033[2m⟳ delegating to sub-agent\033[0m\n")
+		}
+
 		if !anySerial && len(toolCalls) > 1 {
 			// All calls are safe to parallelize (write_file, read_file, find_files, etc.)
 			type indexedResult struct {
@@ -262,7 +276,7 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 			for i, tc := range toolCalls {
 				i, tc := i, tc
 				go func() {
-					ch <- indexedResult{i, a.tools.Execute(tc.Function.Name, tc.Function.Arguments)}
+					ch <- indexedResult{i, a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)}
 				}()
 			}
 			for range toolCalls {
@@ -271,7 +285,7 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 			}
 		} else {
 			for i, tc := range toolCalls {
-				results[i] = tcResult{tc: tc, result: a.tools.Execute(tc.Function.Name, tc.Function.Arguments)}
+				results[i] = tcResult{tc: tc, result: a.tools.Execute(ctx, tc.Function.Name, tc.Function.Arguments)}
 			}
 		}
 
@@ -405,6 +419,16 @@ func toolDetail(tc llm.ToolCall) string {
 		if n, ok := args["n"].(float64); ok && int(n) != 10 {
 			return fmt.Sprintf("-%d", int(n))
 		}
+	case "run_task":
+		if t, ok := args["task"].(string); ok {
+			r := []rune(t)
+			if len(r) > 60 {
+				return string(r[:60]) + "…"
+			}
+			return t
+		}
+	case "semantic_search":
+		return pick("query")
 	}
 	return ""
 }

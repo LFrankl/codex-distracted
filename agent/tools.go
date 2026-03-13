@@ -27,11 +27,18 @@ type ToolRegistry struct {
 	defs     []llm.Tool
 	approver Approver
 	undo     UndoStack
-	rag      *ragState // nil when RAG is not available
+	rag      *ragState   // nil when RAG is not available
+	client   *llm.Client // used by run_task to spawn sub-agents
+	depth    int         // 0 = main agent, 1 = sub-agent (run_task blocked)
 }
 
-func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
-	r := &ToolRegistry{workDir: workDir, approver: approver}
+func NewToolRegistry(workDir string, approver Approver, client *llm.Client, depth int) *ToolRegistry {
+	r := &ToolRegistry{
+		workDir:  workDir,
+		approver: approver,
+		client:   client,
+		depth:    depth,
+	}
 	r.defs = []llm.Tool{
 		r.defReadFile(),
 		r.defWriteFile(),
@@ -48,6 +55,7 @@ func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
 		r.defGitLog(),
 		r.defGitCommit(),
 		r.defSemanticSearch(),
+		r.defRunTask(), // registered at all depths; blocked at runtime when depth > 0
 	}
 	return r
 }
@@ -56,7 +64,7 @@ func (r *ToolRegistry) Definitions() []llm.Tool {
 	return r.defs
 }
 
-func (r *ToolRegistry) Execute(name, argsJSON string) ToolResult {
+func (r *ToolRegistry) Execute(ctx context.Context, name, argsJSON string) ToolResult {
 	switch name {
 	case "read_file":
 		return r.readFile(argsJSON)
@@ -88,6 +96,8 @@ func (r *ToolRegistry) Execute(name, argsJSON string) ToolResult {
 		return r.gitCommit(argsJSON)
 	case "semantic_search":
 		return r.semanticSearch(argsJSON)
+	case "run_task":
+		return r.runTask(ctx, argsJSON)
 	default:
 		return ToolResult{Content: fmt.Sprintf("unknown tool: %s", name), IsError: true}
 	}
