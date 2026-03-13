@@ -7,11 +7,11 @@
 - **ReAct 智能循环** — 思考、调用工具、观察结果，循环执行
 - **流式输出** — 响应逐 token 流式返回，无需等待完整结果
 - **两种工作模式** — 极简模式（严格按要求执行）和深度模式（探索、规划、验证）
-- **20 个内置工具** — 文件读写/修改、Shell 命令、代码搜索、Git 完整工作流、HTTP/网页抓取、文件符号概览、并行子任务
-- **向量索引 / RAG** — 对代码库建立本地语义索引，支持自然语言搜索代码
+- **21 个内置工具** — 文件读写/修改、Shell 命令、代码搜索、Git 完整工作流、HTTP/网页抓取、文件符号概览、并行子任务
+- **BM25 本地代码搜索** — 开箱即用，零依赖，无需任何 API key；可选升级为向量语义搜索
 - **子 Agent 并行执行** — 将独立任务分发给多个子 agent 同时运行
 - **会话持久化** — 保存并跨次恢复对话
-- **上下文压缩** — 自动摘要旧历史，保持在 token 限制内
+- **上下文压缩 + 自动恢复** — 自动摘要旧历史；超出上下文限制时自动压缩并重试，不崩溃
 - **撤销栈** — 使用 `/undo` 撤销任意文件写入或修改
 - **项目记忆** — 在项目根目录放置 `.codex.md`，每次会话自动注入
 - **智能操作确认** — 只读命令（`ls`、`git status` 等）自动通过，写操作才需确认
@@ -88,8 +88,8 @@ codex [参数] [提示词]
 | `/save [名称]` | 保存当前会话 |
 | `/load <id>` | 加载已保存的会话 |
 | `/sessions` | 列出所有已保存的会话 |
-| `/index [--force]` | 对当前项目建立（或更新）向量索引 |
-| `/index-status` | 显示向量索引统计信息 |
+| `/index [--force]` | 对当前项目建立（或更新）索引（BM25 全量 + 向量增量） |
+| `/index-status` | 显示索引统计（BM25 chunk 数、向量索引维度等） |
 | `/help` | 显示帮助 |
 | `exit` / `Ctrl+D` | 退出（如有未保存内容会提示保存） |
 | 连按两次 `Ctrl+C` | 立即退出 |
@@ -117,7 +117,7 @@ codex [参数] [提示词]
 | `git_push` | 推送到远端（需确认；force push 使用 `--force-with-lease`） |
 | `web_fetch` | 抓取任意 URL 并以纯文本返回（文档、GitHub Issue、API 规范等） |
 | `file_outline` | 列出文件中所有符号（函数/类/类型）及其行号，无需读取全文 |
-| `semantic_search` | 按语义搜索代码库（需先运行 `/index`） |
+| `semantic_search` | 按语义/关键词搜索代码库（需先运行 `/index`） |
 | `run_task` | 将独立任务分发给子 agent 并行执行 |
 
 ## web_fetch：抓取网页
@@ -180,86 +180,131 @@ func    printToolResult  461
 4. **验证** — 运行测试或编译；发现失败先修复再结束
 5. **汇报** — 总结改了什么、为什么
 
+深度模式下有专门的调试工作流：先陈述假设，再针对性读取证据，最小化修改后验证——避免一个一个盲目尝试读文件。
+
 深度模式下 `❯` 提示符变为紫色。
 
-## 向量索引 / RAG
+## 代码搜索与索引
 
-向量索引让 agent 能够通过**自然语言语义**搜索代码库，而不是靠 grep 盲猜。在大型项目中尤其有用：不知道"认证逻辑在哪个文件"时，直接问就能找到。
+distracted-codex 的 `semantic_search` 工具背后有两种搜索后端，通过统一的 `Searcher` 接口抽象，可无缝切换：
 
-### 开启方式
-
-在 `~/.codex/config.yaml` 中为你的提供商加上 `embed_model`：
-
-```yaml
-current_provider: deepseek
-providers:
-  deepseek:
-    name: deepseek
-    base_url: https://api.deepseek.com/v1
-    api_key: sk-xxxxxxxxxxxxxxxx
-    model: deepseek-chat
-    embed_model: deepseek-embedding   # 加这一行
+```
+semantic_search 工具
+        │
+        ▼
+   Searcher 接口（Search / Kind）
+   ┌─────────────────┬────────────────┐
+   │                 │                │
+   ▼                 ▼                ▼
+BM25Index       VecSearcher     LocalVecSearcher
+（本地，零依赖）  （向量 API）      （ONNX，规划中）
 ```
 
-各提供商的 embedding 模型参考：
+**优先级**：向量搜索 > BM25（两者都有时向量生效）。
 
-| 提供商 | embed_model 值 |
-|--------|----------------|
-| DeepSeek | `deepseek-embedding` |
-| Qwen（通义） | `text-embedding-v3` |
-| OpenAI | `text-embedding-3-small` |
-| Zhipu | `embedding-3` |
+### BM25 本地搜索（默认，开箱即用）
 
-### 使用流程
+不需要 `embed_model`，不调用任何外部 API。启动时自动加载已有索引。
+
+**工作原理**：BM25 是改进版 TF-IDF，是搜索引擎（Elasticsearch 等）的标准排序算法。对代码搜索效果好，因为标识符、函数名是高频且有区分性的词元。
+
+分词器专门针对代码处理驼峰命名和下划线命名：
+
+```
+getUserById  →  getuserbyid, get, user, by, id
+HTTPRequest  →  httprequest, http, request
+user_profile →  user, profile
+```
 
 ```bash
-# 进入你的项目目录
+# 进入项目，建立 BM25 索引（无 API 调用，通常 < 5s）
 cd ~/my-project
-
-# 启动 REPL
 codex
-
-# 第一次建立索引（只对新建/变更文件调用 embedding API）
 /index
 
 # 查看索引统计
 /index-status
-# 输出示例：
-# index: 42 files · 187 chunks · 1536-dim · model: deepseek-embedding (deepseek)
+# 示例输出：
+# BM25 index: 312 chunks (203 files)
+# No vector index — run /index with embed_model configured to enable semantic search
+```
+
+索引持久化到 `~/.codex/index/<项目hash>/bm25.bin`，下次启动自动加载。
+
+### 向量语义搜索（可选，需配置 embed_model）
+
+向量搜索理解语义，能处理概念性查询（"在哪里处理错误"即使代码里没有"错误"这个词也能找到）。
+
+在 `~/.codex/config.yaml` 中为你的提供商加上 `embed_model`：
+
+```yaml
+current_provider: qwen
+providers:
+  qwen:
+    name: qwen
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: sk-xxxxxxxxxxxxxxxx
+    model: qwen-max
+    embed_model: text-embedding-v3   # 加这一行
+```
+
+各提供商的 embedding 模型参考：
+
+| 提供商 | embed_model 值 | 说明 |
+|--------|----------------|------|
+| Qwen（通义） | `text-embedding-v3` | 推荐，支持代码 |
+| OpenAI | `text-embedding-3-small` | 通用 |
+| Zhipu | `embedding-3` | |
+| DeepSeek | ❌ 不支持 | 请使用其他提供商的 embedding |
+
+配置后运行 `/index`，向量索引会在 BM25 之后建立并自动生效：
+
+```bash
+/index
+# BM25: rebuilt 312 chunks
+# embedding 203 files... done
+# vector index: 312 chunks · 1024-dim · model: text-embedding-v3
+
+/index-status
+# BM25 index: 312 chunks (203 files)
+# vector index: 312 chunks · 1024-dim · text-embedding-v3 (qwen)
 # last updated: 2024-03-15 14:32:01
-
-# 强制全量重建（比如切换了 embed_model）
-/index --force
 ```
 
-索引建好后，agent 会自动使用 `semantic_search` 工具搜索代码：
+向量索引只在 `/index` 时对新建/变更文件调用 embedding API（增量更新），下次启动自动加载。
 
-```
-你：帮我找一下用户认证相关的代码在哪
+### 两种搜索后端对比
 
-agent → semantic_search("user authentication middleware")
-      → auth/middleware.go  lines 12–45  (score 0.91)
-      → auth/jwt.go         lines 1–30   (score 0.84)
-      → ...
-```
+| | BM25（默认） | 向量搜索（可选） |
+|---|---|---|
+| 需要 embed_model | 否 | 是 |
+| API 调用 | 无 | 仅 `/index` 时 |
+| 查询速度 | 极快（纯本地） | 快（embed query 一次） |
+| 适合查询 | 函数名、标识符、精确关键词 | 自然语言描述、概念性查询 |
+| 典型用例 | "getUserById 在哪" | "在哪里处理认证失败" |
 
 ### 存储说明
 
-| 数据 | 存储位置 | 说明 |
-|------|----------|------|
-| 向量索引 | `~/.codex/index/<项目hash>/chunks.bin` | gob 编码，本地文件 |
-| 索引元数据 | `~/.codex/index/<项目hash>/meta.json` | 文件 mtime 记录 |
+所有索引存在 `~/.codex/index/` 下，按项目路径哈希隔离：
 
-- **向量搜索完全本地**，不发送任何数据到外部
-- 只有 `/index` 时，新增/变更的文件才会调用 embedding API
-- 增量更新：只重新 embed 自上次索引后有变化的文件
-- 每个项目按 workDir 路径的哈希隔离，互不干扰
+```
+~/.codex/index/
+└── a3f2b1c0/              ← SHA-256(workDir)[:8]
+    ├── bm25.bin           ← BM25 索引（gob 编码）
+    ├── chunks.bin         ← 向量索引（gob 编码，仅配置 embed_model 后存在）
+    └── meta.json          ← 向量索引元数据（provider、model、文件 mtime 记录）
+```
+
+- 向量搜索完全本地，搜索时不发送任何数据到外部
+- 每个项目按 workDir 哈希隔离，互不干扰
 
 ### 分块策略
 
 - 文件 ≤ 80 行：整文件作为一个 chunk
-- 文件 > 80 行：每 60 行一个 chunk，相邻 chunk 重叠 15 行
-- 自动跳过：`.git`、`node_modules`、`vendor`、`*.pb.go`、`*.min.js` 等
+- 文件 > 80 行：每 60 行一个 chunk，相邻重叠 15 行（防止函数被截断）
+- 自动跳过：`.git`、`node_modules`、`vendor`、`dist`、`build`、`*.pb.go`、`*.min.js` 等
+
+详细的搜索架构文档见 [`docs/search-index.md`](docs/search-index.md)。
 
 ## 子 Agent 并行执行
 
@@ -288,6 +333,8 @@ agent → semantic_search("user authentication middleware")
 - **不能再次分发**子任务（防止无限递归）
 - 父 agent 取消（Ctrl+C）会同时终止所有子 agent
 
+**重要**：子 agent 不能使用交互式脚手架 CLI（`npm create`、`yarn create`、`vite`、`create-react-app`、`cargo init`、`django-admin startproject` 等），因为它们需要 stdin 输入会永久阻塞。子 agent 会直接用 `write_file` 创建 `package.json`、`vite.config.ts` 等项目文件，再运行非交互式命令（`npm install`、`go mod tidy`）。
+
 适合使用 `run_task` 的场景：
 
 - 前端 + 后端分开写（不同目录）
@@ -313,13 +360,19 @@ agent → semantic_search("user authentication middleware")
 
 ## 上下文压缩
 
-当对话历史较长（估算超过 4000 token）时，旧消息会自动被摘要替换。摘要保留：
+当对话历史较长（估算超过 20000 token）时，旧消息会自动被摘要替换。摘要保留：
 
 - 创建或修改的文件及变更内容
 - 关键决策及原因
 - 遇到的错误及解决方式
 
-最近的消息始终完整保留。Shell 输出在历史中截断为 2000 字符（但在终端完整显示）。
+最近 6 条消息始终完整保留。Shell 输出在历史中截断为 2000 字符（但在终端完整显示）。
+
+**自动恢复**：如果 API 返回上下文超限错误（`context length exceeded`），agent 会立即触发强制压缩并重试，不崩溃、不中断对话。终端会显示：
+
+```
+[context limit hit — compressing and retrying]
+```
 
 ## 项目记忆
 
@@ -371,7 +424,14 @@ providers:
     base_url: https://api.deepseek.com/v1
     api_key: sk-xxxxxxxxxxxxxxxx
     model: deepseek-chat
-    embed_model: deepseek-embedding   # 可选，启用 RAG
+    # embed_model 不填则使用 BM25 本地搜索（推荐）
+    # DeepSeek 暂不支持 embedding，如需向量搜索请配置 qwen/openai
+  qwen:
+    name: qwen
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: sk-xxxxxxxxxxxxxxxx
+    model: qwen-max
+    embed_model: text-embedding-v3   # 可选，启用向量语义搜索
   custom:
     name: custom
     base_url: https://my-api.example.com/v1
@@ -397,13 +457,17 @@ providers:
 │   ├── tools_git.go        # Git 工具：status/diff/log/commit/branch/pull/push
 │   ├── tools_fetch.go      # 网页抓取工具（web_fetch）
 │   ├── tools_outline.go    # 文件符号概览工具（file_outline）
-│   ├── tools_rag.go        # 语义搜索工具（semantic_search）
+│   ├── tools_rag.go        # 语义搜索工具（semantic_search）、Searcher 接口连接
 │   ├── tools_subagent.go   # 子 agent 工具（run_task）
 │   ├── subagent.go         # 子 agent 运行器
+│   ├── searcher.go         # Searcher 接口定义 + CodeResult 类型
+│   ├── bm25.go             # BM25 索引实现（打分、分词、驼峰拆分）
+│   ├── bm25indexer.go      # BM25 全量重建索引器
+│   ├── vecsearcher.go      # VecSearcher（向量 API）+ LocalVecSearcher（ONNX 占位）
 │   ├── vecindex.go         # 本地向量索引（gob + 余弦相似度）
 │   ├── chunker.go          # 文件分块策略
-│   ├── indexer.go          # 增量项目索引器
-│   ├── compressor.go       # 上下文压缩与 token 估算
+│   ├── indexer.go          # 向量增量索引器
+│   ├── compressor.go       # 上下文压缩、token 估算、消息序列修复
 │   ├── session.go          # 会话保存/加载/列表/删除
 │   ├── memory.go           # 项目记忆（.codex.md）加载
 │   ├── approver.go         # 确认回调（交互式 / 自动）
@@ -415,8 +479,10 @@ providers:
 │   └── stats.go            # 单轮和会话 token 统计
 ├── llm/
 │   └── client.go           # OpenAI 兼容流式 SSE 客户端 + Embed()
-└── config/
-    └── config.go           # 配置加载/保存、提供商管理
+├── config/
+│   └── config.go           # 配置加载/保存、提供商管理
+└── docs/
+    └── search-index.md     # 搜索/索引子系统详细架构文档
 ```
 
 ## 跨平台构建

@@ -50,6 +50,21 @@ func ChunkFile(relPath, content string) []FileChunk {
 	return chunks
 }
 
+// shouldSkipDir returns true for directories that should never be indexed.
+func shouldSkipDir(name string) bool {
+	if name == "" {
+		return false
+	}
+	if name[0] == '.' {
+		return true // .git, .cache, etc.
+	}
+	switch name {
+	case "node_modules", "vendor", "dist", "build", "__pycache__", ".next", "out":
+		return true
+	}
+	return false
+}
+
 // shouldIndex returns true if the file should be included in the RAG index.
 func shouldIndex(relPath string) bool {
 	// Skip hidden paths

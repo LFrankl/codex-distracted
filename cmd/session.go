@@ -180,7 +180,7 @@ func sessionResumeCmd() *cobra.Command {
 			fmt.Printf("\033[32m✓\033[0m \033[2mResumed session %s  (%d messages, %s)\033[0m\n",
 				s.ID, len(s.Messages), s.CreatedAt.Format("2006-01-02 15:04"))
 
-			return runREPL(ag, nil, provider.Name, model, workDir)
+			return runREPL(ag, agent.NewBM25Indexer(workDir, os.Stdout), nil, provider.Name, model, workDir)
 		},
 	}
 }

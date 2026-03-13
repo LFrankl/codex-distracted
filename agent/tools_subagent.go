@@ -23,7 +23,15 @@ Rules:
 - Include ALL necessary context in 'task'; the sub-agent has no conversation history.
 - Sub-agents auto-approve all file operations (no user prompts).
 - Sub-agents cannot spawn further agents.
-- Do NOT use for tasks that depend on each other's output.`,
+- Do NOT use for tasks that depend on each other's output.
+
+CRITICAL — project scaffolding in sub-agents:
+- NEVER use interactive CLIs: npm create, yarn create, vite, create-react-app, cargo init,
+  django-admin startproject, etc. They require stdin and will hang indefinitely.
+- ALWAYS write project files directly with write_file (package.json, vite.config.ts,
+  src/main.ts, go.mod, main.go, etc.) then run only non-interactive commands
+  (npm install, go mod tidy, go build).
+- Batch ALL write_file calls in a single response — do not write one file and wait.`,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

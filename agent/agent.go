@@ -52,6 +52,12 @@ Tool guidance:
 - git_branch / git_pull / git_push: full branch lifecycle (pull/push require confirmation)
 - run_task: parallel sub-agents for independent work (separate dirs/modules).
   Each sub-agent gets no conversation history — include all context in 'task'.
+  CRITICAL for sub-agents creating new projects:
+  • NEVER use interactive scaffolding CLIs (npm create, yarn create, vite, create-react-app,
+    cargo init with prompts) — they require stdin and will hang forever.
+  • Instead write all project files directly with write_file in one batch:
+    package.json, vite.config.ts, tsconfig.json, src/main.ts, src/App.vue, etc.
+  • After writing files, run non-interactive commands only: npm install, go mod tidy, go build.
 
 Examples:
 - User: "ls"                          → shell_exec("ls"), done.
@@ -60,6 +66,7 @@ Examples:
 - User: "write a fibonacci function"  → write fib.go, done. No tests, no README.
 - User: "fix main.go line 42"         → read_file(main.go, 40–50), patch, done.
 - User: "write frontend + backend"    → run_task(frontend) + run_task(backend) in ONE response.
+  Each task must say: "write files directly, do NOT use npm create / vite / any interactive CLI".
 - User: "why does login fail?"        → grep_files("login") to locate, read relevant lines, done.
 - Need to understand foo.go + bar.go? → read_file(foo.go) + read_file(bar.go) in ONE response.
 
@@ -86,7 +93,7 @@ git_branch, git_pull, git_push, web_fetch, file_outline, semantic_search, run_ta
 | Read a small file (<80 lines) | read_file directly |
 | External docs / GitHub issues | web_fetch |
 | Test a local API | http_request |
-| Independent parallel modules | run_task (multiple in ONE response) |
+| Independent parallel modules | run_task (multiple in ONE response) — sub-agents must write files directly, never use interactive CLIs |
 | Build/test verification | shell_exec |
 
 **BATCH RULE — applies to ALL tool calls:**
@@ -221,9 +228,20 @@ func (a *Agent) Undo() (string, error) { return a.tools.undo.Pop() }
 // UndoLen returns how many undo steps are available.
 func (a *Agent) UndoLen() int { return a.tools.undo.Len() }
 
-// SetRAG attaches a loaded vector index so the semantic_search tool becomes active.
+// SetSearcher attaches any Searcher implementation to the agent.
+// Calling it multiple times replaces the previous searcher.
+func (a *Agent) SetSearcher(s Searcher) {
+	a.tools.SetSearcher(s)
+}
+
+// SetRAG is a convenience wrapper: creates a VecSearcher and attaches it.
 func (a *Agent) SetRAG(index *VecIndex, embedModel string) {
 	a.tools.SetRAG(index, a.client, embedModel)
+}
+
+// SetBM25 is a convenience wrapper: attaches a BM25Index as the searcher.
+func (a *Agent) SetBM25(idx *BM25Index) {
+	a.tools.SetBM25(idx)
 }
 
 // Reset clears conversation history (keeps system prompt)
