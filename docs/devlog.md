@@ -66,6 +66,20 @@
 
 ---
 
+## 2024-03 · 子 agent 仍在执行 mkdir + 写出破损代码
+
+**问题**：专用 subAgentPrompt 加入后，子 agent 仍然：①用 `mkdir` 建目录（提示词规则被 LLM 忽略）；②写出缺少 import 的 Go 代码，再打两次补丁才能编译，每次都多一个 LLM 往返。
+
+**根本原因**：
+1. `mkdir` 禁令是软文本规则，DeepSeek 会无视。
+2. 子 agent 没有被要求在写文件前先想清楚全部 import 和依赖，导致第一次写出不完整的代码。
+
+**解决方案**：
+1. `isMkdirOnly()` 函数识别纯 `mkdir` 命令（含 `&&` 和 `;` 链）；在 `shellExec` 里当 `depth > 0`（子 agent）时直接跳过，返回提示信息，代码层面彻底屏蔽。
+2. `subAgentPrompt` 新增 STEP 0（写前思考）：在调用任何 `write_file` 之前，必须在脑中规划好完整文件列表和每个文件的所有 import；"一次正确的写入胜过三次修补"。
+
+---
+
 ## 2024-03 · DeepSeek 不支持 embedding
 
 **问题**：配置 `embed_model: deepseek-embedding` 后，`/index` 调用向量 API 报错。
