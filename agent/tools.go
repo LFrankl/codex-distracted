@@ -34,6 +34,10 @@ func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
 		r.defListFiles(),
 		r.defShellExec(),
 		r.defGrepFiles(),
+		r.defGitStatus(),
+		r.defGitDiff(),
+		r.defGitLog(),
+		r.defGitCommit(),
 	}
 	return r
 }
@@ -56,6 +60,14 @@ func (r *ToolRegistry) Execute(name, argsJSON string) ToolResult {
 		return r.patchFile(argsJSON)
 	case "grep_files":
 		return r.grepFiles(argsJSON)
+	case "git_status":
+		return r.gitStatus(argsJSON)
+	case "git_diff":
+		return r.gitDiff(argsJSON)
+	case "git_log":
+		return r.gitLog(argsJSON)
+	case "git_commit":
+		return r.gitCommit(argsJSON)
 	default:
 		return ToolResult{Content: fmt.Sprintf("unknown tool: %s", name), IsError: true}
 	}

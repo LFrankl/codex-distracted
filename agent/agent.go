@@ -69,9 +69,16 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	// Initialize system prompt on first message
 	if len(a.messages) == 0 {
 		workDir := a.tools.workDir
+		prompt := fmt.Sprintf(systemPrompt, workDir)
+
+		if mem, memPath := loadProjectMemory(workDir); mem != "" {
+			prompt += "\n\n## Project Memory (.codex.md)\n" + mem
+			printMemoryLoaded(a.out, memPath, mem)
+		}
+
 		a.messages = append(a.messages, llm.Message{
 			Role:    "system",
-			Content: fmt.Sprintf(systemPrompt, workDir),
+			Content: prompt,
 		})
 	}
 
