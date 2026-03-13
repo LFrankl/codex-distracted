@@ -357,6 +357,82 @@ func (r *ToolRegistry) defShellExec() llm.Tool {
 	}
 }
 
+// isSafeReadOnly returns true for commands that only read state and never mutate files or
+// processes. These are auto-approved without prompting the user.
+func isSafeReadOnly(command string) bool {
+	// Trim leading env var assignments like "FOO=bar cmd ..."
+	cmd := strings.TrimSpace(command)
+
+	// Extract the base command (first token, ignoring env var prefix)
+	parts := strings.Fields(cmd)
+	if len(parts) == 0 {
+		return false
+	}
+	base := filepath.Base(parts[0])
+
+	safeCommands := map[string]bool{
+		// filesystem inspection
+		"ls": true, "ll": true, "la": true, "dir": true,
+		"pwd": true, "echo": true, "cat": true, "head": true, "tail": true,
+		"wc": true, "stat": true, "file": true, "du": true, "df": true,
+		"find": true, "tree": true, "realpath": true,
+		// text processing (read-only)
+		"grep": true, "rg": true, "ag": true, "awk": true, "sed": true,
+		"sort": true, "uniq": true, "cut": true, "tr": true, "diff": true,
+		"less": true, "more": true, "strings": true, "hexdump": true,
+		// system info
+		"which": true, "whereis": true, "type": true, "env": true, "printenv": true,
+		"uname": true, "hostname": true, "whoami": true, "id": true, "date": true,
+		"uptime": true, "ps": true, "top": true, "htop": true,
+		// language/tool versions
+		"go": true, "node": true, "python": true, "python3": true, "ruby": true,
+		"java": true, "rustc": true, "cargo": true, "npm": true, "yarn": true,
+		"pnpm": true, "bun": true, "pip": true, "pip3": true,
+		// git read-only
+		"git": true,
+		// network info (read-only)
+		"curl": true, "wget": true, "ping": true, "nslookup": true, "dig": true,
+		"netstat": true, "ss": true, "lsof": true,
+	}
+
+	if !safeCommands[base] {
+		return false
+	}
+
+	// Special cases: git is only safe for read-only subcommands
+	if base == "git" {
+		safeGitSubs := map[string]bool{
+			"status": true, "log": true, "diff": true, "show": true,
+			"branch": true, "tag": true, "remote": true, "fetch": true,
+			"ls-files": true, "rev-parse": true, "describe": true,
+			"shortlog": true, "blame": true, "stash": true, "config": true,
+		}
+		if len(parts) < 2 {
+			return false
+		}
+		return safeGitSubs[parts[1]]
+	}
+
+	// curl/wget with -X POST or -d flag is a write operation — treat as unsafe
+	if base == "curl" || base == "wget" {
+		for _, p := range parts[1:] {
+			if p == "-X" || p == "--request" || p == "-d" || p == "--data" ||
+				p == "--data-raw" || p == "--data-binary" || p == "--upload-file" || p == "-T" {
+				return false
+			}
+			// -XPOST, -XPUT etc. (combined flag)
+			if strings.HasPrefix(p, "-X") && len(p) > 2 {
+				method := strings.ToUpper(p[2:])
+				if method != "GET" && method != "HEAD" {
+					return false
+				}
+			}
+		}
+	}
+
+	return true
+}
+
 func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 	var args struct {
 		Command        string `json:"command"`
@@ -371,9 +447,9 @@ func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 		args.TimeoutSeconds = 30
 	}
 
-	// Show command and request approval
+	// Auto-approve safe read-only commands; prompt only for mutating ones.
 	fmt.Printf("\n\033[2m  $ %s\033[0m\n", args.Command)
-	if !r.approver("Execute shell command", args.Command) {
+	if !isSafeReadOnly(args.Command) && !r.approver("Execute shell command", args.Command) {
 		return ToolResult{Content: "shell_exec cancelled by user", IsError: true}
 	}
 
