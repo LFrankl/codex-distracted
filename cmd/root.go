@@ -149,14 +149,14 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	}
 
 	// Interactive REPL mode
-	err = runREPL(ag, bm25Idxer, idxer, provider.Name, model, workDir)
+	err = runREPL(ag, bm25Idxer, idxer, provider.Name, model, workDir, flagSession)
 	if flagSaveAs != "" {
 		saveSession(ag, provider.Name, model, workDir, flagSaveAs)
 	}
 	return err
 }
 
-func runREPL(ag *agent.Agent, bm25Idxer *agent.BM25Indexer, idxer *agent.Indexer, provider, model, workDir string) error {
+func runREPL(ag *agent.Agent, bm25Idxer *agent.BM25Indexer, idxer *agent.Indexer, provider, model, workDir, loadedSessionID string) error {
 	promptFn := func() string {
 		if ag.IsThorough() {
 			return "\033[35m❯\033[0m "
@@ -192,12 +192,14 @@ func runREPL(ag *agent.Agent, bm25Idxer *agent.BM25Indexer, idxer *agent.Indexer
 
 	fmt.Println("\033[2mType your request · /help for commands\033[0m")
 
+	currentSessionID := loadedSessionID
+
 	for {
 		rl.SetPrompt(promptFn())
 		line, err := rl.Readline()
 		if err != nil { // EOF or interrupt
 			fmt.Println()
-			promptSaveOnExit(ag, provider, model, workDir)
+			promptSaveOnExit(ag, provider, model, workDir, currentSessionID)
 			fmt.Println("Goodbye!")
 			return nil
 		}
@@ -209,7 +211,7 @@ func runREPL(ag *agent.Agent, bm25Idxer *agent.BM25Indexer, idxer *agent.Indexer
 
 		switch {
 		case line == "exit" || line == "quit" || line == "/quit":
-			promptSaveOnExit(ag, provider, model, workDir)
+			promptSaveOnExit(ag, provider, model, workDir, currentSessionID)
 			fmt.Println("Goodbye!")
 			return nil
 
@@ -266,7 +268,9 @@ func runREPL(ag *agent.Agent, bm25Idxer *agent.BM25Indexer, idxer *agent.Indexer
 				fmt.Println("Usage: /load <session-id>")
 				continue
 			}
-			loadSession(ag, id)
+			if loadSession(ag, id) {
+				currentSessionID = id
+			}
 			continue
 
 		case line == "/index-status":
@@ -379,18 +383,19 @@ func saveSession(ag *agent.Agent, provider, model, workDir, name string) {
 	fmt.Printf("\033[32m✓ Session saved: %s\033[0m  (%d messages%s)\n", id, len(msgs), extra)
 }
 
-func loadSession(ag *agent.Agent, id string) {
+func loadSession(ag *agent.Agent, id string) bool {
 	s, err := agent.LoadSession(id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\033[31m✗ %v\033[0m\n", err)
-		return
+		return false
 	}
 	ag.SetMessages(s.Messages)
 	fmt.Printf("\033[32m✓ Loaded session %s\033[0m  (%d messages, saved %s)\n",
 		s.ID, len(s.Messages), s.CreatedAt.Format("2006-01-02 15:04"))
+	return true
 }
 
-func promptSaveOnExit(ag *agent.Agent, provider, model, workDir string) {
+func promptSaveOnExit(ag *agent.Agent, provider, model, workDir, loadedSessionID string) {
 	if flagSaveAs != "" {
 		return
 	}
@@ -402,6 +407,12 @@ func promptSaveOnExit(ag *agent.Agent, provider, model, workDir string) {
 		}
 	}
 	if userCount == 0 {
+		return
+	}
+
+	// If a session was loaded, auto-save back to it without prompting.
+	if loadedSessionID != "" {
+		saveSession(ag, provider, model, workDir, loadedSessionID)
 		return
 	}
 

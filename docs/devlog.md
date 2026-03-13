@@ -209,3 +209,58 @@
 3. Agent 循环串行执行工具时，一旦某个结果的 `Instruction != ""`，立即将后续未执行的工具标记为 `cancelled`，所有工具结果写入消息历史后，追加一条 `role: user` 消息（内容为 instruction），然后 `continue` 进入下一步，让 LLM 基于新指令继续工作。
 
 ---
+
+## 2024-03 · 加载会话后关闭仍弹保存提示，且不回写原文件
+
+**问题**：用 `/load <id>` 或 `--session <id>` 加载一个已保存的会话，继续对话后退出，仍然弹出"Save this session?"提示；选 Yes 后输入名称，会创建一个新文件而不是覆盖原会话。
+
+**根本原因**：`runREPL` 和 `promptSaveOnExit` 都不知道当前 session 是从哪个 ID 加载的。`loadSession` 只是把消息设进 agent，没有把 ID 传回去；`promptSaveOnExit` 始终走"问名字→新建"路径。
+
+**解决方案**：
+1. `runREPL` 签名增加 `loadedSessionID string` 参数，内部用 `currentSessionID` 变量跟踪。
+2. `/load` 命令处：`loadSession` 改为返回 `bool`，成功后更新 `currentSessionID = id`。
+3. `promptSaveOnExit` 增加 `loadedSessionID string` 参数：若非空，直接以该 ID 调用 `saveSession`（`SaveSession` 按 ID 覆盖写文件），不再弹提示。
+4. `session resume` 子命令和 `--session` flag 均将原 ID 传入 `runREPL`，保证 resume 场景也正常回写。
+
+**效果**：加载已有会话后退出，静默回写原文件并打印 `✓ Session saved: <id>`，不再弹确认框，也不会产生重复会话文件。
+
+---
+
+## 2024-03 · Debug 能力系统性加强
+
+**问题**：Agent 诊断 bug 时行为混乱——重复读同一文件、用 build 命令重现已有报错、grep 搜索范围太窄或太宽却无法自知、卡住后往更宽的方向盲目扩展，最终在无用工具调用上浪费大量 token。
+
+**根本原因（三层）**：
+1. **提示词层**：规则过于通用，没有约束"假设驱动"、"步数预算"、"卡住时的正确升级方向"等关键行为。
+2. **工具层**：工具结果不携带诊断反馈，LLM 无法从结果本身感知到"我在重复自己"或"我在做无效操作"。
+3. **执行层**：无论 LLM 忽不忽略提示词规则，工具调用都会照常执行，没有任何硬信号阻止低效行为。
+
+**解决方案**：
+
+### 提示词层（`debugContext` 重写）
+- **假设驱动**：每次工具调用前必须能说清"我预期找到什么、为什么"，说不出来就不调用。
+- **3 步诊断预算**：最多 3 次 read/grep，之后必须修或升级给用户。
+- **升级协议**：预算耗尽未找到根因 → 告知用户"我查了 A、B、C，还不确定 X，你能告诉我 Y 吗"，而非继续试。
+- **正确升级方向**：卡住时往更精准的方向搜（更窄的 pattern、更具体的行号），绝不往更宽的方向走（build 系统、config 文件、无关模块）。
+- **结构性错误通用规则**：error line 是 parser 放弃处，实际问题在它之前；搜整个类别（所有声明、所有开合 token），而不只搜报错中提到的那一个符号。
+
+### 工具层硬信号（`tools.go`）
+三个机制，不依赖 LLM 记不记得提示词：
+
+1. **重复 read 检测**：`ToolRegistry` 记录每个文件的最近读取序号（`recentReads map[string]int`）。同一文件再次读时，结果开头插入警告：
+   ```
+   [⚠ Duplicate read: foo.vue was already read 3 tool call(s) ago. Extract all needed info this time — do not read it again.]
+   ```
+   write/patch 成功后自动删除该文件的缓存条目（内容变了，下次读合法）；每次 `Run()` 调用重置所有状态。
+
+2. **Build 命令无修改警告**：`ToolRegistry` 跟踪 `anyWrite bool`，在当前 `Run()` 内任何 write/patch 成功后置 true。`shellExec` 检测到 `!anyWrite && isLikelyBuildCommand(cmd)` 时，终端打印黄色警告，工具结果开头插入：
+   ```
+   [⚠ No files modified yet this session — running a build reproduces the existing error. Only run builds to verify a fix after patching.]
+   ```
+   `isLikelyBuildCommand` 覆盖主流构建命令（npm/yarn/pnpm/go/cargo/python/make/vite/tsc/gradle 等），泛化设计。
+
+3. **Grep 输出量提示**：每次 grep 结果末尾追加 `--- N output lines ---`，超过 50 行额外提示 `(search may be too broad)`。LLM 看到 0 行 → 模式太窄；看到 200 行 → 模式太宽，不再靠猜。
+
+**效果**：工具结果本身携带诊断反馈，LLM 在每个工具调用点都能感知自己的行为是否合理，不需要依赖对提示词规则的记忆。
+
+---

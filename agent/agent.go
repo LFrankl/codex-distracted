@@ -27,16 +27,37 @@ ABSOLUTE RULES (never violate):
 // Appears right before the message → highest LLM attention.
 const debugContext = `[DEBUG PROTOCOL — injected because your message looks like a bug/error report]
 
-Before touching any file:
-• No error text provided? Ask ONE question first: "Can you paste the exact error / console output?"
-• Need runtime output (build log, server log, browser console)? Ask the user to run the command
-  and paste the result. Do NOT guess blindly.
+Before any tool call:
+• No error text? Ask ONE question: "Can you paste the exact error / stack trace?"
+• Error already has file + line? Go there directly. Do NOT run build/test/serve commands
+  to "gather more info" — you already have it. Never reproduce an error the user already showed you.
 
-Diagnose efficiently:
-• From the error message, name the 1–3 most likely files. State your hypothesis in one sentence.
-• Find symbols with grep_files before reaching for read_file.
-• Files >80 lines: file_outline first → read only the relevant section (start_line/end_line).
-• Never read a file "just in case" — every read needs a stated reason.
+Hypothesis-first discipline (CRITICAL):
+• Before EVERY tool call, state in one sentence what you expect to find and why.
+  If you cannot state a reason, do not make the call.
+• After each tool call, explicitly update: "Found X → hypothesis confirmed/revised/eliminated."
+• This prevents aimless exploration and makes each step accountable.
+
+3-step diagnostic budget:
+• You get at most 3 diagnostic tool calls (reads + greps) before you must either fix or escalate.
+• Step 1: targeted read/grep at the most likely location.
+• Step 2: if step 1 was inconclusive, ONE more targeted search — narrower and more precise.
+• Step 3: if still stuck, STOP. Do not try a 4th approach. Escalate to the user (see below).
+• When stuck, go DEEPER (more precise search), never BROADER (build system, config files,
+  unrelated modules). Broadening scope is the wrong response to being stuck.
+
+Escalate instead of looping:
+• After the budget is spent without a clear root cause, tell the user:
+  "I've checked [A, B, C]. Still uncertain about [X]. Can you [specific ask]?"
+• Secondary files (config, build system, type definitions) only when the error explicitly
+  implicates them — syntax/runtime errors are almost never config problems.
+
+Structural / consistency errors (mismatched tokens, undefined symbol, type mismatch, import not found…):
+• The error line is where the compiler gave up — the actual mistake is usually before it.
+• Search the ENTIRE relevant scope for ALL instances of the relevant construct.
+  Wrong: grep only for the specific symbol named in the error.
+  Right: grep for the whole class (all declarations, all opening tokens, all usages).
+• Count opens vs closes, declarations vs usages — find the imbalance systematically.
 
 Pause after diagnosis:
 • State "Root cause: X. Fix: Y. Proceed?" and WAIT for confirmation before patching.
@@ -44,7 +65,8 @@ Pause after diagnosis:
 
 Fix & verify:
 • Minimal patch only — do not refactor surrounding code.
-• Re-run the failing command to confirm the fix. If still failing, revise the hypothesis.`
+• Re-run the failing command once to confirm. If still failing, revise hypothesis — do not retry
+  the same fix with minor variations.`
 
 // planContext is prepended to the user message when a feature/change intent is detected.
 const planContext = `[IMPLEMENT PROTOCOL — injected because your message looks like a feature/change request]
@@ -214,6 +236,8 @@ func (a *Agent) injectContext(userMsg string) string {
 
 // Run processes a user message through the agent loop
 func (a *Agent) Run(ctx context.Context, userMsg string) error {
+	a.tools.ResetRunState() // reset per-message diagnostic tracking
+
 	// Initialize system prompt on first message
 	if len(a.messages) == 0 {
 		workDir := a.tools.workDir

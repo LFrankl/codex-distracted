@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"codex/llm"
@@ -32,6 +33,21 @@ type ToolRegistry struct {
 	client      *llm.Client // used by run_task to spawn sub-agents
 	depth       int         // 0 = main agent, 1 = sub-agent (run_task blocked)
 	preApproved bool        // set by agent loop for batch-approved concurrent patch execution
+
+	// Diagnostic tracking (reset each Run call via ResetRunState)
+	mu          sync.Mutex
+	recentReads map[string]int // abs path → call index of last read
+	callIdx     int            // increments on each read_file / grep_files call
+	anyWrite    bool           // true once any write_file / patch_file succeeds this run
+}
+
+// ResetRunState clears per-run diagnostic state. Call at the start of each agent.Run().
+func (r *ToolRegistry) ResetRunState() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recentReads = make(map[string]int)
+	r.callIdx = 0
+	r.anyWrite = false
 }
 
 func NewToolRegistry(workDir string, approver Approver, client *llm.Client, depth int) *ToolRegistry {
@@ -161,9 +177,29 @@ func (r *ToolRegistry) readFile(argsJSON string) ToolResult {
 	}
 
 	path := r.resolvePath(args.Path)
+
+	// Duplicate-read detection: warn if same file was read recently without any intervening write.
+	r.mu.Lock()
+	r.callIdx++
+	current := r.callIdx
+	if r.recentReads == nil {
+		r.recentReads = make(map[string]int)
+	}
+	dupAt, isDup := r.recentReads[path]
+	r.recentReads[path] = current
+	r.mu.Unlock()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("read error: %v", err), IsError: true}
+	}
+
+	var dupWarning string
+	if isDup {
+		dupWarning = fmt.Sprintf(
+			"[⚠ Duplicate read: %s was already read %d tool call(s) ago. "+
+				"Extract all needed info this time — do not read it again.]\n",
+			args.Path, current-dupAt)
 	}
 
 	content := string(data)
@@ -185,7 +221,7 @@ func (r *ToolRegistry) readFile(argsJSON string) ToolResult {
 		for i, line := range lines[start:end] {
 			fmt.Fprintf(&sb, "%4d | %s\n", start+i+1, line)
 		}
-		return ToolResult{Content: sb.String()}
+		return ToolResult{Content: dupWarning + sb.String()}
 	}
 
 	// Add line numbers for full file
@@ -194,7 +230,7 @@ func (r *ToolRegistry) readFile(argsJSON string) ToolResult {
 	for i, line := range lines {
 		fmt.Fprintf(&sb, "%4d | %s\n", i+1, line)
 	}
-	return ToolResult{Content: sb.String()}
+	return ToolResult{Content: dupWarning + sb.String()}
 }
 
 // --- Tool: write_file ---
@@ -263,6 +299,11 @@ func (r *ToolRegistry) writeFile(argsJSON string) ToolResult {
 	if _, err := f.WriteString(args.Content); err != nil {
 		return ToolResult{Content: fmt.Sprintf("write error: %v", err), IsError: true}
 	}
+
+	r.mu.Lock()
+	r.anyWrite = true
+	delete(r.recentReads, path) // file changed; next read is fresh
+	r.mu.Unlock()
 
 	lines := strings.Count(args.Content, "\n") + 1
 	return ToolResult{Content: fmt.Sprintf("Written %d bytes (%d lines) to %s", len(args.Content), lines, args.Path)}
@@ -471,6 +512,30 @@ func isSafeReadOnly(command string) bool {
 	return true
 }
 
+// isLikelyBuildCommand returns true for commands that compile, test, or run code —
+// i.e., commands that would reproduce an existing error rather than verify a fix.
+func isLikelyBuildCommand(command string) bool {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	patterns := []string{
+		"npm run ", "yarn run ", "pnpm run ", "bun run ",
+		"go build", "go test", "go run", "go vet",
+		"cargo build", "cargo test", "cargo run", "cargo check",
+		"python -m ", "pytest", "py.test",
+		"vue-tsc", "tsc ", "tsc\n",
+		"webpack", "vite build", "vite ",
+		"make ", "make\t", "cmake ",
+		"mvn ", "gradle ", "./gradlew",
+		"bundle exec", "rake ",
+		"dotnet build", "dotnet run", "dotnet test",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // isMkdirOnly returns true if the command is exclusively creating directories
 // (e.g. "mkdir foo", "mkdir -p a/b/c", "mkdir -p a && mkdir -p b").
 // Used to silently skip redundant mkdir calls in sub-agents.
@@ -520,6 +585,15 @@ func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 	// already creates parent directories automatically, so mkdir is always redundant.
 	if r.depth > 0 && isMkdirOnly(args.Command) {
 		return ToolResult{Content: "(skipped: write_file creates directories automatically)"}
+	}
+
+	// If no files have been modified yet and this looks like a build/test command,
+	// warn that it will reproduce the same error already in context.
+	r.mu.Lock()
+	anyWrite := r.anyWrite
+	r.mu.Unlock()
+	if !anyWrite && isLikelyBuildCommand(args.Command) {
+		fmt.Printf("\n\033[33m  ⚠ No files modified yet — this build will reproduce the existing error.\033[0m\n")
 	}
 
 	// Auto-approve safe read-only commands; prompt only for mutating ones.
@@ -575,6 +649,10 @@ func (r *ToolRegistry) shellExec(argsJSON string) ToolResult {
 
 	if result == "" {
 		result = "(no output)"
+	}
+	if !anyWrite && isLikelyBuildCommand(args.Command) {
+		result = "[⚠ No files modified yet this session — running a build reproduces the existing error. " +
+			"Only run builds to verify a fix after patching.]\n\n" + result
 	}
 	return ToolResult{Content: result}
 }
@@ -657,14 +735,32 @@ func (r *ToolRegistry) grepFiles(argsJSON string) ToolResult {
 	}
 	grepArgs = append(grepArgs, searchPath)
 
+	r.mu.Lock()
+	r.callIdx++
+	r.mu.Unlock()
+
 	cmd := exec.Command("grep", grepArgs...)
 	output, _ := cmd.CombinedOutput()
-	result := string(output)
+	result := strings.TrimRight(string(output), "\n")
 
 	if result == "" {
-		return ToolResult{Content: "No matches found"}
+		return ToolResult{Content: "No matches found — pattern may be too specific or wrong file path"}
 	}
-	return ToolResult{Content: result}
+
+	// Count non-empty output lines so the LLM can judge search breadth.
+	lineCount := 0
+	for _, l := range strings.Split(result, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lineCount++
+		}
+	}
+	hint := ""
+	if lineCount > 50 {
+		hint = fmt.Sprintf("\n--- %d output lines (search may be too broad — consider narrowing the pattern) ---", lineCount)
+	} else {
+		hint = fmt.Sprintf("\n--- %d output lines ---", lineCount)
+	}
+	return ToolResult{Content: result + hint}
 }
 
 // --- Tool: patch_file ---
@@ -794,6 +890,10 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 		if err := os.WriteFile(path, []byte(current), 0644); err != nil {
 			return ToolResult{Content: fmt.Sprintf("write error: %v", err), IsError: true}
 		}
+		r.mu.Lock()
+		r.anyWrite = true
+		delete(r.recentReads, path)
+		r.mu.Unlock()
 		oldLines := strings.Count(original, "\n") + 1
 		newLines := strings.Count(current, "\n") + 1
 		delta := newLines - oldLines
@@ -869,6 +969,10 @@ func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
 	if err := os.WriteFile(path, []byte(patched), 0644); err != nil {
 		return ToolResult{Content: fmt.Sprintf("write error: %v", err), IsError: true}
 	}
+	r.mu.Lock()
+	r.anyWrite = true
+	delete(r.recentReads, path)
+	r.mu.Unlock()
 
 	// Build summary
 	oldLines := strings.Count(original, "\n") + 1
