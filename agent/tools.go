@@ -28,6 +28,7 @@ func NewToolRegistry(workDir string) *ToolRegistry {
 	r.defs = []llm.Tool{
 		r.defReadFile(),
 		r.defWriteFile(),
+		r.defPatchFile(),
 		r.defListFiles(),
 		r.defShellExec(),
 		r.defGrepFiles(),
@@ -49,6 +50,8 @@ func (r *ToolRegistry) Execute(name, argsJSON string) ToolResult {
 		return r.listFiles(argsJSON)
 	case "shell_exec":
 		return r.shellExec(argsJSON)
+	case "patch_file":
+		return r.patchFile(argsJSON)
 	case "grep_files":
 		return r.grepFiles(argsJSON)
 	default:
@@ -446,6 +449,155 @@ func (r *ToolRegistry) grepFiles(argsJSON string) ToolResult {
 		return ToolResult{Content: "No matches found"}
 	}
 	return ToolResult{Content: result}
+}
+
+// --- Tool: patch_file ---
+
+func (r *ToolRegistry) defPatchFile() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name: "patch_file",
+			Description: `Edit a file by replacing specific content. Prefer this over write_file when modifying existing files.
+
+Two modes (pick one per call):
+1. String mode: provide old_str + new_str — finds the exact string and replaces it.
+2. Line mode: provide start_line + end_line + new_content — replaces that line range.
+
+Tips:
+- old_str must match the file exactly (including indentation).
+- Use read_file first to see the exact content before patching.
+- For multiple independent edits in the same file, make separate patch_file calls.`,
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "File path, relative to working directory or absolute",
+					},
+					"old_str": map[string]any{
+						"type":        "string",
+						"description": "[String mode] Exact substring to find and replace. Must be unique in the file.",
+					},
+					"new_str": map[string]any{
+						"type":        "string",
+						"description": "[String mode] Replacement text. Use empty string to delete old_str.",
+					},
+					"start_line": map[string]any{
+						"type":        "integer",
+						"description": "[Line mode] First line to replace (1-based, inclusive)",
+					},
+					"end_line": map[string]any{
+						"type":        "integer",
+						"description": "[Line mode] Last line to replace (1-based, inclusive)",
+					},
+					"new_content": map[string]any{
+						"type":        "string",
+						"description": "[Line mode] Text that replaces lines start_line..end_line. May contain newlines. Use empty string to delete those lines.",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	}
+}
+
+func (r *ToolRegistry) patchFile(argsJSON string) ToolResult {
+	var args struct {
+		Path       string `json:"path"`
+		OldStr     string `json:"old_str"`
+		NewStr     string `json:"new_str"`
+		StartLine  int    `json:"start_line"`
+		EndLine    int    `json:"end_line"`
+		NewContent string `json:"new_content"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+
+	path := r.resolvePath(args.Path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("read error: %v", err), IsError: true}
+	}
+	original := string(data)
+
+	// Decide mode
+	useLineMode := args.StartLine > 0 || args.EndLine > 0
+	useStrMode := args.OldStr != ""
+
+	if useLineMode && useStrMode {
+		return ToolResult{Content: "specify either old_str or start_line/end_line, not both", IsError: true}
+	}
+	if !useLineMode && !useStrMode {
+		return ToolResult{Content: "provide old_str (string mode) or start_line+end_line (line mode)", IsError: true}
+	}
+
+	var patched string
+
+	if useStrMode {
+		patched, err = patchByString(original, args.OldStr, args.NewStr)
+	} else {
+		patched, err = patchByLines(original, args.StartLine, args.EndLine, args.NewContent)
+	}
+	if err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
+
+	if err := os.WriteFile(path, []byte(patched), 0644); err != nil {
+		return ToolResult{Content: fmt.Sprintf("write error: %v", err), IsError: true}
+	}
+
+	// Build summary
+	oldLines := strings.Count(original, "\n") + 1
+	newLines := strings.Count(patched, "\n") + 1
+	delta := newLines - oldLines
+	sign := "+"
+	if delta < 0 {
+		sign = ""
+	}
+	return ToolResult{
+		Content: fmt.Sprintf("Patched %s (%d → %d lines, %s%d)", args.Path, oldLines, newLines, sign, delta),
+	}
+}
+
+// patchByString replaces the first (and only) occurrence of oldStr.
+// Returns an error if oldStr is not found or is ambiguous (appears more than once).
+func patchByString(content, oldStr, newStr string) (string, error) {
+	count := strings.Count(content, oldStr)
+	if count == 0 {
+		// Provide a helpful hint showing nearby content
+		return "", fmt.Errorf("old_str not found in file — check indentation and whitespace")
+	}
+	if count > 1 {
+		return "", fmt.Errorf("old_str matches %d locations; make it more specific by including more context", count)
+	}
+	return strings.Replace(content, oldStr, newStr, 1), nil
+}
+
+// patchByLines replaces lines [startLine, endLine] (1-based, inclusive) with newContent.
+func patchByLines(content string, startLine, endLine int, newContent string) (string, error) {
+	lines := strings.Split(content, "\n")
+	n := len(lines)
+
+	if startLine < 1 || startLine > n {
+		return "", fmt.Errorf("start_line %d out of range (file has %d lines)", startLine, n)
+	}
+	if endLine < startLine {
+		return "", fmt.Errorf("end_line %d must be >= start_line %d", endLine, startLine)
+	}
+	if endLine > n {
+		endLine = n
+	}
+
+	var parts []string
+	parts = append(parts, lines[:startLine-1]...)
+	if newContent != "" {
+		parts = append(parts, strings.Split(newContent, "\n")...)
+	}
+	parts = append(parts, lines[endLine:]...)
+
+	return strings.Join(parts, "\n"), nil
 }
 
 // --- helpers ---
