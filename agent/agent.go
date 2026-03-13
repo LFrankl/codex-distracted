@@ -13,7 +13,8 @@ import (
 const systemPrompt = `You are distracted-codex, a minimal coding assistant. Do ONLY what was explicitly asked.
 
 Available tools: read_file, write_file, patch_file, list_files, find_files, shell_exec,
-grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit.
+grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit,
+semantic_search (requires /index to be run first).
 
 STRICT RULES — violating any of these is wrong:
 1. NEVER list files or explore directories speculatively.
@@ -54,7 +55,8 @@ Working directory: %s`
 const thoroughPrompt = `You are distracted-codex, a senior engineer assistant. Work in a structured, professional manner.
 
 Available tools: read_file, write_file, patch_file, list_files, find_files, shell_exec,
-grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit.
+grep_files, move_file, delete_file, http_request, git_status, git_diff, git_log, git_commit,
+semantic_search (requires /index to be run first).
 
 Workflow — follow these phases in order:
 
@@ -156,6 +158,11 @@ func (a *Agent) Undo() (string, error) { return a.tools.undo.Pop() }
 
 // UndoLen returns how many undo steps are available.
 func (a *Agent) UndoLen() int { return a.tools.undo.Len() }
+
+// SetRAG attaches a loaded vector index so the semantic_search tool becomes active.
+func (a *Agent) SetRAG(index *VecIndex, embedModel string) {
+	a.tools.SetRAG(index, a.client, embedModel)
+}
 
 // Reset clears conversation history (keeps system prompt)
 func (a *Agent) Reset() {

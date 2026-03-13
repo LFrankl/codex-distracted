@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -248,6 +249,61 @@ func (c *Client) parseStream(r io.Reader, onEvent func(StreamEvent)) error {
 		return fmt.Errorf("stream read: %w", err)
 	}
 	return nil
+}
+
+// --- Embeddings ---
+
+type embedRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+type embedResponse struct {
+	Data  []embedData `json:"data"`
+	Error *APIError   `json:"error,omitempty"`
+}
+
+type embedData struct {
+	Index     int       `json:"index"`
+	Embedding []float32 `json:"embedding"`
+}
+
+// Embed calls the /embeddings endpoint and returns vectors in input order.
+// model is the embedding model name (may differ from the chat model).
+func (c *Client) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
+	body, err := json.Marshal(embedRequest{Model: model, Input: texts})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("embed request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	var er embedResponse
+	if err := json.Unmarshal(data, &er); err != nil {
+		return nil, fmt.Errorf("embed parse: %w", err)
+	}
+	if er.Error != nil {
+		return nil, er.Error
+	}
+
+	sort.Slice(er.Data, func(i, j int) bool { return er.Data[i].Index < er.Data[j].Index })
+	vecs := make([][]float32, len(er.Data))
+	for i, d := range er.Data {
+		vecs[i] = d.Embedding
+	}
+	return vecs, nil
 }
 
 // NonStreamChat for providers that don't support streaming well

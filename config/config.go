@@ -9,10 +9,11 @@ import (
 )
 
 type Provider struct {
-	Name    string `yaml:"name"`
-	BaseURL string `yaml:"base_url"`
-	APIKey  string `yaml:"api_key"`
-	Model   string `yaml:"model"`
+	Name       string `yaml:"name"`
+	BaseURL    string `yaml:"base_url"`
+	APIKey     string `yaml:"api_key"`
+	Model      string `yaml:"model"`
+	EmbedModel string `yaml:"embed_model,omitempty"` // model for /embeddings API; empty = RAG disabled
 }
 
 type Config struct {

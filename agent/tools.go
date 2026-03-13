@@ -27,6 +27,7 @@ type ToolRegistry struct {
 	defs     []llm.Tool
 	approver Approver
 	undo     UndoStack
+	rag      *ragState // nil when RAG is not available
 }
 
 func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
@@ -46,6 +47,7 @@ func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
 		r.defGitDiff(),
 		r.defGitLog(),
 		r.defGitCommit(),
+		r.defSemanticSearch(),
 	}
 	return r
 }
@@ -84,6 +86,8 @@ func (r *ToolRegistry) Execute(name, argsJSON string) ToolResult {
 		return r.gitLog(argsJSON)
 	case "git_commit":
 		return r.gitCommit(argsJSON)
+	case "semantic_search":
+		return r.semanticSearch(argsJSON)
 	default:
 		return ToolResult{Content: fmt.Sprintf("unknown tool: %s", name), IsError: true}
 	}

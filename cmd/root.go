@@ -92,6 +92,18 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	client := llm.NewClient(provider.BaseURL, provider.APIKey, model)
 	ag := agent.New(client, workDir, cfg.MaxSteps, os.Stdout, approver, flagThorough)
 
+	// Attach RAG index if embed model is configured and an index already exists
+	var idxer *agent.Indexer
+	if provider.EmbedModel != "" {
+		idxer = agent.NewIndexer(workDir, provider.Name, provider.EmbedModel, client, os.Stdout)
+		if idxer.HasIndex() {
+			if vi, err := idxer.LoadIndex(); err == nil {
+				ag.SetRAG(vi, provider.EmbedModel)
+				fmt.Fprintf(os.Stdout, "\033[2m[RAG index loaded — %d chunks]\033[0m\n", len(vi.Chunks))
+			}
+		}
+	}
+
 	// Resume a saved session if --session is set
 	if flagSession != "" {
 		s, err := agent.LoadSession(flagSession)
@@ -128,14 +140,14 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	}
 
 	// Interactive REPL mode
-	err = runREPL(ag, provider.Name, model, workDir)
+	err = runREPL(ag, idxer, provider.Name, model, workDir)
 	if flagSaveAs != "" {
 		saveSession(ag, provider.Name, model, workDir, flagSaveAs)
 	}
 	return err
 }
 
-func runREPL(ag *agent.Agent, provider, model, workDir string) error {
+func runREPL(ag *agent.Agent, idxer *agent.Indexer, provider, model, workDir string) error {
 	promptFn := func() string {
 		if ag.IsThorough() {
 			return "\033[35m❯\033[0m "
@@ -225,6 +237,33 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 			}
 			loadSession(ag, id)
 			continue
+
+		case line == "/index-status":
+			if idxer == nil {
+				fmt.Println("\033[2mRAG disabled — set embed_model for your provider in ~/.codex/config.yaml\033[0m")
+			} else {
+				idxer.Status()
+			}
+			continue
+
+		case strings.HasPrefix(line, "/index"):
+			if idxer == nil {
+				fmt.Println("\033[2mRAG disabled — set embed_model for your provider in ~/.codex/config.yaml\033[0m")
+				continue
+			}
+			force := strings.Contains(line, "--force") || strings.Contains(line, "force")
+			ctx, cancel := interruptContext()
+			err := idxer.Run(ctx, force)
+			cancel()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "\033[31m✗ index failed: %v\033[0m\n", err)
+				continue
+			}
+			// Reload the index into the agent
+			if vi, err := idxer.LoadIndex(); err == nil {
+				ag.SetRAG(vi, idxer.EmbedModel())
+			}
+			continue
 		}
 
 		ctx, cancel := interruptContext()
@@ -276,6 +315,8 @@ func printHelp() {
   /save [name]      Save current session
   /load <id>        Load a saved session
   /sessions         List saved sessions
+  /index [--force]  Build (or update) the codebase vector index for RAG
+  /index-status     Show current index statistics
   /help             Show this help
   exit              Exit Codex`)
 }
