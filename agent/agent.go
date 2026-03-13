@@ -26,6 +26,9 @@ STRICT RULES — violating any of these is wrong:
 9. If patch_file fails with "old_str not found", the error message includes the current
    file content. Use THAT content to construct the correct old_str. Do NOT guess or retry
    with a different old_str without reading the actual current content first.
+10. BATCH tool calls: when creating or modifying multiple independent files, return ALL
+    tool calls in a single response — do NOT wait for each file's result before writing the next.
+    Writing 5 files = one response with 5 write_file calls in parallel, not 5 round trips.
 
 Examples:
 - User: "ls"            → shell_exec("ls"), done.
@@ -59,6 +62,7 @@ Workflow — follow these phases in order:
    - Edit only the files necessary. Don't touch unrelated code.
    - Prefer patch_file over write_file for existing files.
    - Follow existing code style, naming conventions, and patterns in the repo.
+   - BATCH independent writes: return multiple write_file/patch_file calls in one response.
 
 4. VERIFY (confirm correctness)
    - If tests exist, run them. If the project builds, compile it.
@@ -201,27 +205,79 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 			break
 		}
 
-		// Execute tool calls
-		for _, tc := range toolCalls {
-			a.printToolCall(tc)
-			result := a.tools.Execute(tc.Function.Name, tc.Function.Arguments)
-			a.printToolResult(tc.Function.Name, result)
+		// Execute tool calls — independent calls run concurrently.
+		type tcResult struct {
+			tc      llm.ToolCall
+			result  ToolResult
+			content string
+		}
+		results := make([]tcResult, len(toolCalls))
 
-			// Only truncate shell output — file content must be stored verbatim
-			// so the LLM can construct accurate old_str for patch_file.
-			content := result.Content
-			if tc.Function.Name == "shell_exec" || tc.Function.Name == "grep_files" {
+		// Determine which tools are safe to run concurrently (read-only or independent writes).
+		// Approval-gated tools (shell_exec, patch_file, git_commit) run serially to keep
+		// the approval prompt readable.
+		needsSerial := func(name string) bool {
+			switch name {
+			case "shell_exec", "patch_file", "git_commit":
+				return true
+			}
+			return false
+		}
+
+		// Split into serial and parallel groups preserving order.
+		// Run parallel group first (all at once), then serial ones in order.
+		// Simple approach: if ANY call needs serial, run all serially to preserve ordering.
+		anySerial := false
+		for _, tc := range toolCalls {
+			if needsSerial(tc.Function.Name) {
+				anySerial = true
+				break
+			}
+		}
+
+		if !anySerial && len(toolCalls) > 1 {
+			// All calls are safe to parallelize (write_file, read_file, find_files, etc.)
+			type indexedResult struct {
+				i      int
+				result ToolResult
+			}
+			ch := make(chan indexedResult, len(toolCalls))
+			for i, tc := range toolCalls {
+				i, tc := i, tc
+				go func() {
+					ch <- indexedResult{i, a.tools.Execute(tc.Function.Name, tc.Function.Arguments)}
+				}()
+			}
+			for range toolCalls {
+				r := <-ch
+				results[r.i] = tcResult{tc: toolCalls[r.i], result: r.result}
+			}
+		} else {
+			for i, tc := range toolCalls {
+				results[i] = tcResult{tc: tc, result: a.tools.Execute(tc.Function.Name, tc.Function.Arguments)}
+			}
+		}
+
+		// Print and store results in order.
+		for i := range results {
+			r := &results[i]
+			a.printToolCall(r.tc)
+			a.printToolResult(r.tc.Function.Name, r.result)
+
+			content := r.result.Content
+			if r.tc.Function.Name == "shell_exec" || r.tc.Function.Name == "grep_files" {
 				const maxShellRunes = 2000
 				if runes := []rune(content); len(runes) > maxShellRunes {
 					content = string(runes[:maxShellRunes]) + "\n…(truncated)"
 				}
 			}
+			r.content = content
 
 			a.messages = append(a.messages, llm.Message{
 				Role:       "tool",
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    content,
+				ToolCallID: r.tc.ID,
+				Name:       r.tc.Function.Name,
+				Content:    r.content,
 			})
 		}
 	}
