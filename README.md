@@ -98,8 +98,12 @@ codex [参数] [提示词]
 | `write_file` | 创建或覆盖文件 |
 | `patch_file` | 精确替换文件中的字符串或行范围（显示 diff，需确认） |
 | `list_files` | 列出目录内容 |
+| `find_files` | 按 glob 模式查找文件，如 `**/*.go`、`src/*.ts` |
+| `move_file` | 移动或重命名文件（支持 undo） |
+| `delete_file` | 删除文件（内容备份到 undo 栈，可恢复） |
 | `shell_exec` | 执行 Shell 命令（需确认；命令末尾加 `&` 可后台运行） |
 | `grep_files` | 在文件中搜索内容 |
+| `http_request` | 发起 HTTP GET/POST 请求，方便调试本地 API |
 | `git_status` | 显示工作区状态 |
 | `git_diff` | 显示暂存或未暂存的差异，或与某个 ref 的差异 |
 | `git_log` | 显示最近的提交记录 |

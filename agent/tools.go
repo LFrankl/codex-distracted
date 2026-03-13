@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,8 +36,12 @@ func NewToolRegistry(workDir string, approver Approver) *ToolRegistry {
 		r.defWriteFile(),
 		r.defPatchFile(),
 		r.defListFiles(),
+		r.defFindFiles(),
 		r.defShellExec(),
 		r.defGrepFiles(),
+		r.defMoveFile(),
+		r.defDeleteFile(),
+		r.defHTTPRequest(),
 		r.defGitStatus(),
 		r.defGitDiff(),
 		r.defGitLog(),
@@ -62,6 +68,14 @@ func (r *ToolRegistry) Execute(name, argsJSON string) ToolResult {
 		return r.patchFile(argsJSON)
 	case "grep_files":
 		return r.grepFiles(argsJSON)
+	case "find_files":
+		return r.findFiles(argsJSON)
+	case "move_file":
+		return r.moveFile(argsJSON)
+	case "delete_file":
+		return r.deleteFile(argsJSON)
+	case "http_request":
+		return r.httpRequest(argsJSON)
 	case "git_status":
 		return r.gitStatus(argsJSON)
 	case "git_diff":
@@ -677,6 +691,249 @@ func patchByLines(content string, startLine, endLine int, newContent string) (st
 	parts = append(parts, lines[endLine:]...)
 
 	return strings.Join(parts, "\n"), nil
+}
+
+// --- Tool: find_files ---
+
+func (r *ToolRegistry) defFindFiles() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "find_files",
+			Description: "Find files matching a glob pattern. More precise than list_files. Examples: '*.go', '**/*.ts', 'src/**/*.json'.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": "Glob pattern relative to working directory, e.g. '**/*.go' or 'src/*.ts'",
+					},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	}
+}
+
+func (r *ToolRegistry) findFiles(argsJSON string) ToolResult {
+	var args struct {
+		Pattern string `json:"pattern"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+	if args.Pattern == "" {
+		return ToolResult{Content: "pattern is required", IsError: true}
+	}
+
+	var matches []string
+	err := filepath.WalkDir(r.workDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules" || d.Name() == "vendor") {
+			return filepath.SkipDir
+		}
+		rel, _ := filepath.Rel(r.workDir, path)
+		matched, _ := filepath.Match(args.Pattern, rel)
+		// Also try matching just the filename for simple patterns like "*.go"
+		if !matched {
+			matched, _ = filepath.Match(args.Pattern, d.Name())
+		}
+		if matched && !d.IsDir() {
+			matches = append(matches, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		return ToolResult{Content: "walk error: " + err.Error(), IsError: true}
+	}
+	if len(matches) == 0 {
+		return ToolResult{Content: "no files matched " + args.Pattern}
+	}
+	return ToolResult{Content: strings.Join(matches, "\n")}
+}
+
+// --- Tool: move_file ---
+
+func (r *ToolRegistry) defMoveFile() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "move_file",
+			Description: "Move or rename a file. The original content is saved for undo.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"src": map[string]any{
+						"type":        "string",
+						"description": "Source path (relative or absolute)",
+					},
+					"dst": map[string]any{
+						"type":        "string",
+						"description": "Destination path (relative or absolute)",
+					},
+				},
+				"required": []string{"src", "dst"},
+			},
+		},
+	}
+}
+
+func (r *ToolRegistry) moveFile(argsJSON string) ToolResult {
+	var args struct {
+		Src string `json:"src"`
+		Dst string `json:"dst"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+	src := r.resolvePath(args.Src)
+	dst := r.resolvePath(args.Dst)
+
+	if _, err := os.Stat(src); err != nil {
+		return ToolResult{Content: fmt.Sprintf("source not found: %s", args.Src), IsError: true}
+	}
+
+	// Backup source for undo (undo will restore it at src; dst will remain but that's acceptable)
+	r.undo.Push(src)
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return ToolResult{Content: "mkdir error: " + err.Error(), IsError: true}
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return ToolResult{Content: "move error: " + err.Error(), IsError: true}
+	}
+	return ToolResult{Content: fmt.Sprintf("moved %s → %s", args.Src, args.Dst)}
+}
+
+// --- Tool: delete_file ---
+
+func (r *ToolRegistry) defDeleteFile() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "delete_file",
+			Description: "Delete a file. The content is backed up and can be restored with undo.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "File path to delete (relative or absolute)",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	}
+}
+
+func (r *ToolRegistry) deleteFile(argsJSON string) ToolResult {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+	path := r.resolvePath(args.Path)
+
+	if _, err := os.Stat(path); err != nil {
+		return ToolResult{Content: fmt.Sprintf("file not found: %s", args.Path), IsError: true}
+	}
+
+	// Backup for undo before deleting
+	r.undo.Push(path)
+
+	if err := os.Remove(path); err != nil {
+		return ToolResult{Content: "delete error: " + err.Error(), IsError: true}
+	}
+	return ToolResult{Content: fmt.Sprintf("deleted %s", args.Path)}
+}
+
+// --- Tool: http_request ---
+
+func (r *ToolRegistry) defHTTPRequest() llm.Tool {
+	return llm.Tool{
+		Type: "function",
+		Function: llm.ToolFunction{
+			Name:        "http_request",
+			Description: "Make an HTTP request (GET or POST) to a URL. Useful for testing APIs.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"method": map[string]any{
+						"type":        "string",
+						"description": "HTTP method: GET or POST",
+					},
+					"url": map[string]any{
+						"type":        "string",
+						"description": "Full URL including scheme, e.g. http://localhost:8080/api/users",
+					},
+					"body": map[string]any{
+						"type":        "string",
+						"description": "Request body (for POST), typically JSON string",
+					},
+					"headers": map[string]any{
+						"type":        "object",
+						"description": "Optional HTTP headers as key-value pairs",
+					},
+				},
+				"required": []string{"method", "url"},
+			},
+		},
+	}
+}
+
+func (r *ToolRegistry) httpRequest(argsJSON string) ToolResult {
+	var args struct {
+		Method  string            `json:"method"`
+		URL     string            `json:"url"`
+		Body    string            `json:"body"`
+		Headers map[string]string `json:"headers"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ToolResult{Content: "invalid args: " + err.Error(), IsError: true}
+	}
+
+	method := strings.ToUpper(args.Method)
+	if method != "GET" && method != "POST" {
+		return ToolResult{Content: "only GET and POST are supported", IsError: true}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var bodyReader *strings.Reader
+	if args.Body != "" {
+		bodyReader = strings.NewReader(args.Body)
+	} else {
+		bodyReader = strings.NewReader("")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, args.URL, bodyReader)
+	if err != nil {
+		return ToolResult{Content: "request build error: " + err.Error(), IsError: true}
+	}
+	if args.Body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range args.Headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ToolResult{Content: "request error: " + err.Error(), IsError: true}
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 8192)
+	n, _ := resp.Body.Read(buf)
+	body := strings.TrimSpace(string(buf[:n]))
+
+	result := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, body)
+	return ToolResult{Content: result, IsError: resp.StatusCode >= 400}
 }
 
 // --- helpers ---
