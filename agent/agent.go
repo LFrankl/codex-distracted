@@ -81,6 +81,7 @@ type Agent struct {
 	out      io.Writer
 	stats    SessionStats
 	prompt   string // system prompt template (uses %s for workDir)
+	thorough bool
 }
 
 func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approver Approver, thorough bool) *Agent {
@@ -89,6 +90,7 @@ func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approv
 		tools:    NewToolRegistry(workDir, approver),
 		maxSteps: maxSteps,
 		out:      out,
+		thorough: thorough,
 	}
 	if thorough {
 		a.prompt = thoroughPrompt
@@ -97,6 +99,27 @@ func New(client *llm.Client, workDir string, maxSteps int, out io.Writer, approv
 	}
 	return a
 }
+
+// SetThorough switches the agent between default and thorough mode.
+// It replaces the system message so the new mode takes effect immediately.
+func (a *Agent) SetThorough(on bool) {
+	a.thorough = on
+	if on {
+		a.prompt = thoroughPrompt
+	} else {
+		a.prompt = systemPrompt
+	}
+	// Replace system message in-place so the change applies to the current session
+	workDir := a.tools.workDir
+	newSystem := llm.Message{Role: "system", Content: fmt.Sprintf(a.prompt, workDir)}
+	if len(a.messages) > 0 && a.messages[0].Role == "system" {
+		a.messages[0] = newSystem
+	}
+	// (if no messages yet, Run() will build it fresh)
+}
+
+// IsThorough reports the current mode.
+func (a *Agent) IsThorough() bool { return a.thorough }
 
 // Messages returns the current conversation history.
 func (a *Agent) Messages() []llm.Message { return a.messages }

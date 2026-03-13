@@ -137,8 +137,15 @@ func runAgent(cmd *cobra.Command, args []string) error {
 }
 
 func runREPL(ag *agent.Agent, provider, model, workDir string) error {
+	promptFn := func() string {
+		if ag.IsThorough() {
+			return "\033[1;32mYou\033[0m \033[35m[thorough]\033[0m\033[1;32m:\033[0m "
+		}
+		return "\033[1;32mYou:\033[0m "
+	}
+
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "\033[1;32mYou:\033[0m ",
+		Prompt:          promptFn(),
 		HistoryFile:     config.ConfigDir() + "/.history",
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
@@ -177,6 +184,26 @@ func runREPL(ag *agent.Agent, provider, model, workDir string) error {
 
 		case line == "/help":
 			printHelp()
+			continue
+
+		case line == "/thorough":
+			ag.SetThorough(true)
+			rl.SetPrompt(promptFn())
+			fmt.Println("\033[35m◈ thorough mode — explore, verify, report\033[0m")
+			continue
+
+		case line == "/default":
+			ag.SetThorough(false)
+			rl.SetPrompt(promptFn())
+			fmt.Println("\033[2m◈ default mode — minimal, do exactly what's asked\033[0m")
+			continue
+
+		case line == "/mode":
+			if ag.IsThorough() {
+				fmt.Println("\033[35m● thorough\033[0m")
+			} else {
+				fmt.Println("\033[2m● default\033[0m")
+			}
 			continue
 
 		case line == "/undo":
@@ -249,6 +276,9 @@ func interruptContext() (context.Context, context.CancelFunc) {
 
 func printHelp() {
 	fmt.Println(`Commands:
+  /thorough         Switch to thorough mode (explore, verify, report)
+  /default          Switch to default mode (minimal, do exactly what's asked)
+  /mode             Show current mode
   /reset            Clear conversation history
   /undo             Revert last file write or patch
   /save [name]      Save current session
